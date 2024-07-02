@@ -48,14 +48,29 @@ function setImmediate(callback, ...args) {
  */
 function setTimeout(callback, timeout = 0, ...args) {
   checkThis(this);
+  const snapshot = core.AsyncContext.snapshot();
   // If callback is a string, replace it with a function that evals the string on every timeout
   if (typeof callback !== "function") {
     const unboundCallback = webidl.converters.DOMString(callback);
-    callback = () => indirectEval(unboundCallback);
+    callback = () => {
+      const old = core.AsyncContext.swap(snapshot);
+      try {
+        indirectEval(unboundCallback);
+      } finally {
+        core.AsyncContext.swap(old);
+      }
+    };
   }
   if (args.length > 0) {
     const unboundCallback = callback;
-    callback = () => ReflectApply(unboundCallback, window, args);
+    callback = () => {
+      const old = core.AsyncContext.swap(snapshot);
+      try {
+        ReflectApply(unboundCallback, window, args);
+      } finally {
+        core.AsyncContext.swap(old);
+      }
+    };
   }
   timeout = webidl.converters.long(timeout);
   return core.queueUserTimer(
@@ -71,13 +86,28 @@ function setTimeout(callback, timeout = 0, ...args) {
  */
 function setInterval(callback, timeout = 0, ...args) {
   checkThis(this);
+  const snapshot = core.AsyncContext.snapshot();
   if (typeof callback !== "function") {
     const unboundCallback = webidl.converters.DOMString(callback);
-    callback = () => indirectEval(unboundCallback);
+    callback = () => {
+      const old = core.AsyncContext.swap(snapshot);
+      try {
+        indirectEval(unboundCallback);
+      } finally {
+        core.AsyncContext.swap(old);
+      }
+    };
   }
   if (args.length > 0) {
     const unboundCallback = callback;
-    callback = () => ReflectApply(unboundCallback, window, args);
+    callback = () => {
+      const old = core.AsyncContext.swap(snapshot);
+      try {
+        ReflectApply(unboundCallback, window, args);
+      } finally {
+        core.AsyncContext.swap(old);
+      }
+    };
   }
   timeout = webidl.converters.long(timeout);
   return core.queueUserTimer(

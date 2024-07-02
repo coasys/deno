@@ -92,7 +92,7 @@ Deno.test(async function enterWith() {
   });
 
   assertEquals(await deferred.promise, { x: 2 });
-  assertEquals(await deferred1.promise, { x: 1 });
+  assertEquals(await deferred1.promise, null);
 });
 
 Deno.test(async function snapshot() {

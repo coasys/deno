@@ -13,6 +13,7 @@ import { FixedQueue } from "ext:deno_node/internal/fixed_queue.ts";
 interface Tock {
   callback: (...args: Array<unknown>) => void;
   args: Array<unknown>;
+  snapshot: unknown;
 }
 
 let nextTickEnabled = false;
@@ -23,7 +24,7 @@ export function enableNextTick() {
 const queue = new FixedQueue();
 
 export function processTicksAndRejections() {
-  let tock;
+  let tock: Tock;
   do {
     // deno-lint-ignore no-cond-assign
     while (tock = queue.shift()) {
@@ -31,9 +32,10 @@ export function processTicksAndRejections() {
       // const asyncId = tock[async_id_symbol];
       // emitBefore(asyncId, tock[trigger_async_id_symbol], tock);
 
+      const old = core.AsyncContext.swap(tock.snapshot);
       try {
-        const callback = (tock as Tock).callback;
-        if ((tock as Tock).args === undefined) {
+        const callback = tock.callback;
+        if (tock.args === undefined) {
           callback();
         } else {
           const args = (tock as Tock).args;
@@ -58,6 +60,7 @@ export function processTicksAndRejections() {
         // FIXME(bartlomieju): Deno currently doesn't support async hooks
         // if (destroyHooksExist())
         // emitDestroy(asyncId);
+        core.AsyncContext.swap(old);
       }
 
       // FIXME(bartlomieju): Deno currently doesn't support async hooks
@@ -143,6 +146,7 @@ export function nextTick<T extends Array<unknown>>(
     // FIXME(bartlomieju): Deno currently doesn't support async hooks
     // [async_id_symbol]: asyncId,
     // [trigger_async_id_symbol]: triggerAsyncId,
+    snapshot: core.AsyncContext.snapshot(),
     callback,
     args: args_,
   };
