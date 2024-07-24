@@ -43,7 +43,7 @@ license = "MIT"
 repository = "https://github.com/denoland/deno"
 
 [workspace.dependencies]
-deno_ast = { version = "=0.38.2", features = ["transpiling"], path = "../deno_ast" }
+deno_ast = { version = "=0.38.2", features = ["transpiling"] }
 deno_core = { version = "0.283.0", git = "https://github.com/coasys/deno_core.git", rev = "b2bb94e32c2e94b18279cd1b36e4c198b183c826"}
 
 deno_bench_util = { version = "0.148.0", path = "./bench_util" }
