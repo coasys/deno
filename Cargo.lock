@@ -692,7 +692,7 @@ version = "0.0.0"
 dependencies = [
  "bytes",
  "chrono",
- "deno_ast",
+ "deno_ast 0.38.2",
  "deno_bench_util",
  "deno_cache_dir",
  "deno_core",
@@ -1089,7 +1089,7 @@ dependencies = [
  "console_static_text",
  "dashmap",
  "data-encoding",
- "deno_ast",
+ "deno_ast 0.38.2",
  "deno_bench_util",
  "deno_cache_dir",
  "deno_config",
@@ -1171,6 +1171,48 @@ dependencies = [
  "winres",
  "zeromq",
  "zstd",
+]
+
+[[package]]
+name = "deno_ast"
+version = "0.38.2"
+dependencies = [
+ "anyhow",
+ "base64 0.21.7",
+ "deno_media_type",
+ "deno_terminal",
+ "dprint-swc-ext",
+ "once_cell",
+ "percent-encoding",
+ "serde",
+ "swc_atoms",
+ "swc_bundler",
+ "swc_common",
+ "swc_config",
+ "swc_config_macro",
+ "swc_ecma_ast",
+ "swc_ecma_codegen",
+ "swc_ecma_codegen_macros",
+ "swc_ecma_loader",
+ "swc_ecma_parser",
+ "swc_ecma_transforms_base",
+ "swc_ecma_transforms_classes",
+ "swc_ecma_transforms_macros",
+ "swc_ecma_transforms_optimization",
+ "swc_ecma_transforms_proposal",
+ "swc_ecma_transforms_react",
+ "swc_ecma_transforms_typescript",
+ "swc_ecma_utils",
+ "swc_ecma_visit",
+ "swc_eq_ignore_macros",
+ "swc_graph_analyzer",
+ "swc_macros_common",
+ "swc_visit",
+ "swc_visit_macros",
+ "text_lines",
+ "thiserror",
+ "unicode-width",
+ "url",
 ]
 
 [[package]]
@@ -1304,8 +1346,7 @@ dependencies = [
 [[package]]
 name = "deno_core"
 version = "0.283.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "0f5043f9f636a3fe021e63e41c946499e1706d7565126065c60912fe5c77e54e"
+source = "git+https://github.com/coasys/deno_core.git?rev=b2bb94e32c2e94b18279cd1b36e4c198b183c826#b2bb94e32c2e94b18279cd1b36e4c198b183c826"
 dependencies = [
  "anyhow",
  "bincode",
@@ -1393,7 +1434,7 @@ dependencies = [
  "anyhow",
  "cfg-if",
  "comrak",
- "deno_ast",
+ "deno_ast 0.38.2 (registry+https://github.com/rust-lang/crates.io-index)",
  "deno_graph",
  "futures",
  "handlebars",
@@ -1416,7 +1457,7 @@ checksum = "ebe4b6c67f21a73901e962e92d51065f3c1bb42d2195bca8c2fef9f1808c4c2d"
 dependencies = [
  "anyhow",
  "base64 0.21.7",
- "deno_ast",
+ "deno_ast 0.38.2 (registry+https://github.com/rust-lang/crates.io-index)",
  "deno_graph",
  "escape8259",
  "futures",
@@ -1485,7 +1526,7 @@ dependencies = [
  "anyhow",
  "async-trait",
  "data-url",
- "deno_ast",
+ "deno_ast 0.38.2 (registry+https://github.com/rust-lang/crates.io-index)",
  "deno_semver",
  "deno_unsync",
  "encoding_rs",
@@ -1594,7 +1635,7 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "0568595fd7f8ad76ddf66d70c1c5e3e680ad95c3d5abb44556e94d824643d6e2"
 dependencies = [
  "anyhow",
- "deno_ast",
+ "deno_ast 0.38.2 (registry+https://github.com/rust-lang/crates.io-index)",
  "derive_more",
  "if_chain",
  "log",
@@ -1754,8 +1795,7 @@ dependencies = [
 [[package]]
 name = "deno_ops"
 version = "0.159.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "b26cc5277982de16514282447f8674f9048d4f1b2c0d55c088d0a7d3bf6db385"
+source = "git+https://github.com/coasys/deno_core.git?rev=b2bb94e32c2e94b18279cd1b36e4c198b183c826#b2bb94e32c2e94b18279cd1b36e4c198b183c826"
 dependencies = [
  "proc-macro-rules",
  "proc-macro2",
@@ -1785,7 +1825,7 @@ dependencies = [
 name = "deno_runtime"
 version = "0.162.0"
 dependencies = [
- "deno_ast",
+ "deno_ast 0.38.2",
  "deno_broadcast_channel",
  "deno_cache",
  "deno_canvas",
@@ -2316,7 +2356,7 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "d7c3c339020ebbbbbe5fc049350935ee2ea2ba5a3fc01f753588639a30404cda"
 dependencies = [
  "anyhow",
- "deno_ast",
+ "deno_ast 0.38.2 (registry+https://github.com/rust-lang/crates.io-index)",
  "dprint-core",
  "dprint-core-macros",
  "percent-encoding",
@@ -2545,7 +2585,7 @@ checksum = "e5f9947a8dd5ba292461c84a5bf142497e2840c4165994c5c3b3ae4954d38fef"
 dependencies = [
  "anyhow",
  "base64 0.21.7",
- "deno_ast",
+ "deno_ast 0.38.2 (registry+https://github.com/rust-lang/crates.io-index)",
  "deno_graph",
  "deno_npm",
  "deno_semver",
@@ -3387,12 +3427,11 @@ dependencies = [
 
 [[package]]
 name = "hyper-util"
-version = "0.1.2"
+version = "0.1.3"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "bdea9aac0dbe5a9240d68cfd9501e2db94222c6dc06843e06640b9e07f0fdc67"
+checksum = "ca38ef113da30126bbff9cd1705f9273e15d45498615d138b0c20279ac7a76aa"
 dependencies = [
  "bytes",
- "futures-channel",
  "futures-util",
  "http 1.1.0",
  "http-body 1.0.0",
@@ -3400,7 +3439,6 @@ dependencies = [
  "pin-project-lite",
  "socket2",
  "tokio",
- "tracing",
 ]
 
 [[package]]
@@ -5755,8 +5793,7 @@ dependencies = [
 [[package]]
 name = "serde_v8"
 version = "0.192.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "f7b616df6c4ff5643dd503cbfe119175ebebfd4132512e33de4971f1e91d5739"
+source = "git+https://github.com/coasys/deno_core.git?rev=b2bb94e32c2e94b18279cd1b36e4c198b183c826#b2bb94e32c2e94b18279cd1b36e4c198b183c826"
 dependencies = [
  "num-bigint",
  "serde",
@@ -7502,9 +7539,9 @@ checksum = "5f20c57d8d7db6d3b86154206ae5d8fba62dd39573114de97c2cb0578251f8e1"
 
 [[package]]
 name = "wgpu-core"
-version = "0.20.0"
+version = "0.21.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "ac6a86eaa5e763e59c73cf9e97d55fffd4dfda69fd8bda19589fcf851ddfef1f"
+checksum = "d50819ab545b867d8a454d1d756b90cd5f15da1f2943334ca314af10583c9d39"
 dependencies = [
  "arrayvec",
  "bit-vec",
@@ -7531,9 +7568,9 @@ dependencies = [
 
 [[package]]
 name = "wgpu-hal"
-version = "0.20.0"
+version = "0.21.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "4d71c8ae05170583049b65ee562fd839fdc0b3e9ddb84f4e40c9d5f8ea0d4c8c"
+checksum = "172e490a87295564f3fcc0f165798d87386f6231b04d4548bca458cbbfd63222"
 dependencies = [
  "android_system_properties",
  "arrayvec",
