@@ -31,7 +31,7 @@ only_snapshotted_js_sources = ["include_js_files_for_snapshotting"]
 [lib]
 name = "deno_runtime"
 path = "lib.rs"
-crate-type = ["cdylib", "rlib"]
+crate-type = ["dylib"]
 
 [[example]]
 name = "extension"
