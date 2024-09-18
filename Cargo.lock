@@ -1304,7 +1304,7 @@ dependencies = [
 [[package]]
 name = "deno_core"
 version = "0.283.0"
-source = "git+https://github.com/coasys/deno_core.git?rev=b2bb94e32c2e94b18279cd1b36e4c198b183c826#b2bb94e32c2e94b18279cd1b36e4c198b183c826"
+source = "git+https://github.com/coasys/deno_core.git?branch=v8-dylib#7791d02c2f8d5cb4d4cd892eb640fcac9450228f"
 dependencies = [
  "anyhow",
  "bincode",
@@ -1753,7 +1753,7 @@ dependencies = [
 [[package]]
 name = "deno_ops"
 version = "0.159.0"
-source = "git+https://github.com/coasys/deno_core.git?rev=b2bb94e32c2e94b18279cd1b36e4c198b183c826#b2bb94e32c2e94b18279cd1b36e4c198b183c826"
+source = "git+https://github.com/coasys/deno_core.git?branch=v8-dylib#7791d02c2f8d5cb4d4cd892eb640fcac9450228f"
 dependencies = [
  "proc-macro-rules",
  "proc-macro2",
@@ -1998,6 +1998,7 @@ dependencies = [
 [[package]]
 name = "denokv_proto"
 version = "0.7.0"
+source = "git+https://github.com/coasys/denokv.git?rev=e7cc7b41a78dfcbba7fb3bb325aa576e1a37c9d9#e7cc7b41a78dfcbba7fb3bb325aa576e1a37c9d9"
 dependencies = [
  "anyhow",
  "async-trait",
@@ -2013,6 +2014,7 @@ dependencies = [
 [[package]]
 name = "denokv_remote"
 version = "0.7.0"
+source = "git+https://github.com/coasys/denokv.git?rev=e7cc7b41a78dfcbba7fb3bb325aa576e1a37c9d9#e7cc7b41a78dfcbba7fb3bb325aa576e1a37c9d9"
 dependencies = [
  "anyhow",
  "async-stream",
@@ -2036,6 +2038,7 @@ dependencies = [
 [[package]]
 name = "denokv_sqlite"
 version = "0.7.0"
+source = "git+https://github.com/coasys/denokv.git?rev=e7cc7b41a78dfcbba7fb3bb325aa576e1a37c9d9#e7cc7b41a78dfcbba7fb3bb325aa576e1a37c9d9"
 dependencies = [
  "anyhow",
  "async-stream",
@@ -5752,7 +5755,7 @@ dependencies = [
 [[package]]
 name = "serde_v8"
 version = "0.192.0"
-source = "git+https://github.com/coasys/deno_core.git?rev=b2bb94e32c2e94b18279cd1b36e4c198b183c826#b2bb94e32c2e94b18279cd1b36e4c198b183c826"
+source = "git+https://github.com/coasys/deno_core.git?branch=v8-dylib#7791d02c2f8d5cb4d4cd892eb640fcac9450228f"
 dependencies = [
  "num-bigint",
  "serde",
@@ -7290,9 +7293,8 @@ dependencies = [
 
 [[package]]
 name = "v8"
-version = "0.92.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "234589219e37a7496cbce73d971586db8369871be2420372c45a579b6a919b15"
+version = "0.92.1"
+source = "git+https://github.com/coasys/rusty_v8.git?branch=v0.92.1-dll#213dbb93829b1765b69c63cd5b6221f405a70c4d"
 dependencies = [
  "bitflags 2.5.0",
  "fslock",
