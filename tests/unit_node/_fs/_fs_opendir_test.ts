@@ -1,4 +1,4 @@
-// Copyright 2018-2024 the Deno authors. All rights reserved. MIT license.
+// Copyright 2018-2025 the Deno authors. MIT license.
 
 import {
   assert,
@@ -6,7 +6,7 @@ import {
   assertFalse,
   assertInstanceOf,
   assertThrows,
-} from "@std/assert/mod.ts";
+} from "@std/assert";
 import { opendir, opendirSync } from "node:fs";
 import { Buffer } from "node:buffer";
 import { assertCallbackErrorUncaught } from "../_test_utils.ts";

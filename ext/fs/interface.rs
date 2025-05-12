@@ -1,15 +1,16 @@
-// Copyright 2018-2024 the Deno authors. All rights reserved. MIT license.
+// Copyright 2018-2025 the Deno authors. MIT license.
 
+use core::str;
+use std::borrow::Cow;
 use std::path::Path;
 use std::path::PathBuf;
 use std::rc::Rc;
 
-use serde::Deserialize;
-use serde::Serialize;
-
 use deno_io::fs::File;
 use deno_io::fs::FsResult;
 use deno_io::fs::FsStat;
+use serde::Deserialize;
+use serde::Serialize;
 
 use crate::sync::MaybeSend;
 use crate::sync::MaybeSync;
@@ -68,7 +69,8 @@ pub enum FsFileType {
   Junction,
 }
 
-#[derive(Serialize)]
+/// WARNING: This is part of the public JS Deno API.
+#[derive(Debug, Clone, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct FsDirEntry {
   pub name: String,
@@ -82,19 +84,24 @@ pub type FileSystemRc = crate::sync::MaybeArc<dyn FileSystem>;
 
 pub trait AccessCheckFn:
   for<'a> FnMut(
-  bool,
-  &'a Path,
+  Cow<'a, Path>,
   &'a OpenOptions,
-) -> FsResult<std::borrow::Cow<'a, Path>>
+  &'a dyn crate::GetPath,
+) -> FsResult<CheckedPath<'a>>
 {
 }
 impl<T> AccessCheckFn for T where
   T: for<'a> FnMut(
-    bool,
-    &'a Path,
+    Cow<'a, Path>,
     &'a OpenOptions,
-  ) -> FsResult<std::borrow::Cow<'a, Path>>
+    &'a dyn crate::GetPath,
+  ) -> FsResult<CheckedPath<'a>>
 {
+}
+
+pub enum CheckedPath<'a> {
+  Resolved(Cow<'a, Path>),
+  Unresolved(Cow<'a, Path>),
 }
 
 pub type AccessCheckCb<'a> = &'a mut (dyn AccessCheckFn + 'a);
@@ -119,13 +126,17 @@ pub trait FileSystem: std::fmt::Debug + MaybeSend + MaybeSync {
     access_check: Option<AccessCheckCb<'a>>,
   ) -> FsResult<Rc<dyn File>>;
 
-  fn mkdir_sync(&self, path: &Path, recursive: bool, mode: u32)
-    -> FsResult<()>;
+  fn mkdir_sync(
+    &self,
+    path: &Path,
+    recursive: bool,
+    mode: Option<u32>,
+  ) -> FsResult<()>;
   async fn mkdir_async(
     &self,
     path: PathBuf,
     recursive: bool,
-    mode: u32,
+    mode: Option<u32>,
   ) -> FsResult<()>;
 
   fn chmod_sync(&self, path: &Path, mode: u32) -> FsResult<()>;
@@ -138,6 +149,19 @@ pub trait FileSystem: std::fmt::Debug + MaybeSend + MaybeSync {
     gid: Option<u32>,
   ) -> FsResult<()>;
   async fn chown_async(
+    &self,
+    path: PathBuf,
+    uid: Option<u32>,
+    gid: Option<u32>,
+  ) -> FsResult<()>;
+
+  fn lchown_sync(
+    &self,
+    path: &Path,
+    uid: Option<u32>,
+    gid: Option<u32>,
+  ) -> FsResult<()>;
+  async fn lchown_async(
     &self,
     path: PathBuf,
     uid: Option<u32>,
@@ -219,6 +243,23 @@ pub trait FileSystem: std::fmt::Debug + MaybeSend + MaybeSync {
     mtime_nanos: u32,
   ) -> FsResult<()>;
 
+  fn lutime_sync(
+    &self,
+    path: &Path,
+    atime_secs: i64,
+    atime_nanos: u32,
+    mtime_secs: i64,
+    mtime_nanos: u32,
+  ) -> FsResult<()>;
+  async fn lutime_async(
+    &self,
+    path: PathBuf,
+    atime_secs: i64,
+    atime_nanos: u32,
+    mtime_secs: i64,
+    mtime_nanos: u32,
+  ) -> FsResult<()>;
+
   fn write_file_sync(
     &self,
     path: &Path,
@@ -252,7 +293,7 @@ pub trait FileSystem: std::fmt::Debug + MaybeSend + MaybeSync {
     &self,
     path: &Path,
     access_check: Option<AccessCheckCb>,
-  ) -> FsResult<Vec<u8>> {
+  ) -> FsResult<Cow<'static, [u8]>> {
     let options = OpenOptions::read();
     let file = self.open_sync(path, options, access_check)?;
     let buf = file.read_all_sync()?;
@@ -262,7 +303,7 @@ pub trait FileSystem: std::fmt::Debug + MaybeSend + MaybeSync {
     &'a self,
     path: PathBuf,
     access_check: Option<AccessCheckCb<'a>>,
-  ) -> FsResult<Vec<u8>> {
+  ) -> FsResult<Cow<'static, [u8]>> {
     let options = OpenOptions::read();
     let file = self.open_async(path, options, access_check).await?;
     let buf = file.read_all_async().await?;
@@ -283,25 +324,44 @@ pub trait FileSystem: std::fmt::Debug + MaybeSend + MaybeSync {
   fn exists_sync(&self, path: &Path) -> bool {
     self.stat_sync(path).is_ok()
   }
+  async fn exists_async(&self, path: PathBuf) -> FsResult<bool> {
+    Ok(self.stat_async(path).await.is_ok())
+  }
 
-  fn read_text_file_sync(
+  fn read_text_file_lossy_sync(
     &self,
     path: &Path,
     access_check: Option<AccessCheckCb>,
-  ) -> FsResult<String> {
+  ) -> FsResult<Cow<'static, str>> {
     let buf = self.read_file_sync(path, access_check)?;
-    String::from_utf8(buf).map_err(|err| {
-      std::io::Error::new(std::io::ErrorKind::InvalidData, err).into()
-    })
+    Ok(string_from_cow_utf8_lossy(buf))
   }
-  async fn read_text_file_async<'a>(
+  async fn read_text_file_lossy_async<'a>(
     &'a self,
     path: PathBuf,
     access_check: Option<AccessCheckCb<'a>>,
-  ) -> FsResult<String> {
+  ) -> FsResult<Cow<'static, str>> {
     let buf = self.read_file_async(path, access_check).await?;
-    String::from_utf8(buf).map_err(|err| {
-      std::io::Error::new(std::io::ErrorKind::InvalidData, err).into()
-    })
+    Ok(string_from_cow_utf8_lossy(buf))
+  }
+}
+
+#[inline(always)]
+fn string_from_cow_utf8_lossy(buf: Cow<'static, [u8]>) -> Cow<'static, str> {
+  match buf {
+    Cow::Owned(buf) => Cow::Owned(string_from_utf8_lossy(buf)),
+    Cow::Borrowed(buf) => String::from_utf8_lossy(buf),
+  }
+}
+
+// Like String::from_utf8_lossy but operates on owned values
+#[inline(always)]
+fn string_from_utf8_lossy(buf: Vec<u8>) -> String {
+  match String::from_utf8_lossy(&buf) {
+    // buf contained non-utf8 chars than have been patched
+    Cow::Owned(s) => s,
+    // SAFETY: if Borrowed then the buf only contains utf8 chars,
+    // we do this instead of .into_owned() to avoid copying the input buf
+    Cow::Borrowed(_) => unsafe { String::from_utf8_unchecked(buf) },
   }
 }

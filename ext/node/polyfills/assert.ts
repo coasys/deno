@@ -1,4 +1,4 @@
-// Copyright 2018-2024 the Deno authors. All rights reserved. MIT license.
+// Copyright 2018-2025 the Deno authors. MIT license.
 
 // TODO(petamoriken): enable prefer-primordials for node polyfills
 // deno-lint-ignore-file ban-types prefer-primordials
@@ -17,6 +17,11 @@ import {
   ERR_MISSING_ARGS,
 } from "ext:deno_node/internal/errors.ts";
 import { isDeepEqual } from "ext:deno_node/internal/util/comparisons.ts";
+import { primordials } from "ext:core/mod.js";
+import { CallTracker } from "ext:deno_node/internal/assert/calltracker.js";
+import { deprecate } from "node:util";
+
+const { ObjectPrototypeIsPrototypeOf } = primordials;
 
 function innerFail(obj: {
   actual?: unknown;
@@ -743,9 +748,12 @@ function validateThrownError(
     message = error;
     error = undefined;
   }
+  if (error?.prototype !== undefined && e instanceof error) {
+    return true;
+  }
   if (
-    error instanceof Function && error.prototype !== undefined &&
-    error.prototype instanceof Error
+    typeof error === "function" &&
+    (error === Error || ObjectPrototypeIsPrototypeOf(Error, error))
   ) {
     // error is a constructor
     if (e instanceof error) {
@@ -876,8 +884,15 @@ function isValidThenable(maybeThennable: any): boolean {
   return isThenable && typeof maybeThennable !== "function";
 }
 
+const CallTracker_ = deprecate(
+  CallTracker,
+  "assert.CallTracker is deprecated.",
+  "DEP0173",
+);
+
 Object.assign(strict, {
   AssertionError,
+  CallTracker: CallTracker_,
   deepEqual: deepStrictEqual,
   deepStrictEqual,
   doesNotMatch,
@@ -900,6 +915,7 @@ Object.assign(strict, {
 
 export default Object.assign(assert, {
   AssertionError,
+  CallTracker: CallTracker_,
   deepEqual,
   deepStrictEqual,
   doesNotMatch,

@@ -1,5 +1,5 @@
-// Copyright 2018-2024 the Deno authors. All rights reserved. MIT license.
-import { assertEquals, assertThrows, fail } from "@std/assert/mod.ts";
+// Copyright 2018-2025 the Deno authors. MIT license.
+import { assertEquals, assertThrows, fail } from "@std/assert";
 import { utimes, utimesSync } from "node:fs";
 
 const randomDate = new Date(Date.now() + 1000);

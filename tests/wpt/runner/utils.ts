@@ -1,7 +1,7 @@
-// Copyright 2018-2024 the Deno authors. All rights reserved. MIT license.
+// Copyright 2018-2025 the Deno authors. MIT license.
 /// FLAGS
 
-import { parse } from "../../util/std/flags/mod.ts";
+import { parseArgs } from "@std/cli/parse-args";
 import { join, resolve, ROOT_PATH } from "../../../tools/util.js";
 
 export const {
@@ -15,7 +15,7 @@ export const {
   ["inspect-brk"]: inspectBrk,
   ["no-ignore"]: noIgnore,
   binary,
-} = parse(Deno.args, {
+} = parseArgs(Deno.args, {
   "--": true,
   boolean: ["quiet", "release", "no-interactive", "inspect-brk", "no-ignore"],
   string: ["json", "wptreport", "binary"],
@@ -76,10 +76,13 @@ export function getManifest(): Manifest {
 
 /// WPT TEST EXPECTATIONS
 
-const EXPECTATION_PATH = join(ROOT_PATH, "./tests/wpt/runner/expectation.json");
+export const EXPECTATION_PATH = join(
+  ROOT_PATH,
+  "./tests/wpt/runner/expectation.json",
+);
 
 export interface Expectation {
-  [key: string]: Expectation | boolean | string[];
+  [key: string]: Expectation | boolean | string[] | { ignore: boolean };
 }
 
 export function getExpectation(): Expectation {
@@ -87,10 +90,13 @@ export function getExpectation(): Expectation {
   return JSON.parse(expectationText);
 }
 
-export function saveExpectation(expectation: Expectation) {
+export function saveExpectation(
+  expectation: Expectation,
+  path: string = EXPECTATION_PATH,
+) {
   Deno.writeTextFileSync(
-    EXPECTATION_PATH,
-    JSON.stringify(expectation, undefined, "  "),
+    path,
+    JSON.stringify(expectation, undefined, "  ") + "\n",
   );
 }
 
@@ -99,7 +105,7 @@ export function getExpectFailForCase(
   caseName: string,
 ): boolean {
   if (noIgnore) return false;
-  if (typeof expectation == "boolean") {
+  if (typeof expectation === "boolean") {
     return !expectation;
   }
   return expectation.includes(caseName);
@@ -132,6 +138,15 @@ export function runPy<T extends Omit<Deno.CommandOptions, "cwd">>(
     ...options,
     cwd: join(ROOT_PATH, "./tests/wpt/suite/"),
   }).spawn();
+}
+
+export async function runGitDiff(args: string[]): string {
+  await new Deno.Command("git", {
+    args: ["diff", ...args],
+    stdout: "inherit",
+    stderr: "inherit",
+    cwd: ROOT_PATH,
+  }).output();
 }
 
 export async function checkPy3Available() {

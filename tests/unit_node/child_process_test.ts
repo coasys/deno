@@ -1,4 +1,4 @@
-// Copyright 2018-2024 the Deno authors. All rights reserved. MIT license.
+// Copyright 2018-2025 the Deno authors. MIT license.
 
 import CP from "node:child_process";
 import { Buffer } from "node:buffer";
@@ -9,8 +9,10 @@ import {
   assertNotStrictEquals,
   assertStrictEquals,
   assertStringIncludes,
-} from "@std/assert/mod.ts";
-import * as path from "@std/path/mod.ts";
+  assertThrows,
+} from "@std/assert";
+import * as path from "@std/path";
+import { clearTimeout, setTimeout } from "node:timers";
 
 const { spawn, spawnSync, execFile, execFileSync, ChildProcess } = CP;
 
@@ -63,6 +65,7 @@ Deno.test("[node/child_process disconnect] the method exists", async () => {
   const deferred = withTimeout<void>();
   const childProcess = spawn(Deno.execPath(), ["--help"], {
     env: { NO_COLOR: "true" },
+    stdio: ["pipe", "pipe", "pipe", "ipc"],
   });
   try {
     childProcess.disconnect();
@@ -525,7 +528,6 @@ Deno.test({
     const childProcess = spawn(Deno.execPath(), [
       "run",
       "-A",
-      "--unstable",
       script,
     ]);
     const deferred = Promise.withResolvers<void>();
@@ -651,6 +653,73 @@ Deno.test({
     await pStderr.promise;
     assert(cp.killed);
     assertEquals(cp.signalCode, "SIGIOT");
+  },
+});
+
+Deno.test({
+  name:
+    "[node/child_process spawn] child inherits Deno.env when options.env is not provided",
+  async fn() {
+    const deferred = withTimeout<string>();
+    Deno.env.set("BAR", "BAR");
+    const env = spawn(
+      `"${Deno.execPath()}" eval -p "Deno.env.toObject().BAR"`,
+      {
+        shell: true,
+      },
+    );
+    try {
+      let envOutput = "";
+
+      assert(env.stdout);
+      env.on("error", (err: Error) => deferred.reject(err));
+      env.stdout.on("data", (data) => {
+        envOutput += data;
+      });
+      env.on("close", () => {
+        deferred.resolve(envOutput.trim());
+      });
+      await deferred.promise;
+    } finally {
+      env.kill();
+      Deno.env.delete("BAR");
+    }
+    const value = await deferred.promise;
+    assertEquals(value, "BAR");
+  },
+});
+
+Deno.test({
+  name:
+    "[node/child_process spawn] child doesn't inherit Deno.env when options.env is provided",
+  async fn() {
+    const deferred = withTimeout<string>();
+    Deno.env.set("BAZ", "BAZ");
+    const env = spawn(
+      `"${Deno.execPath()}" eval -p "Deno.env.toObject().BAZ"`,
+      {
+        env: {},
+        shell: true,
+      },
+    );
+    try {
+      let envOutput = "";
+
+      assert(env.stdout);
+      env.on("error", (err: Error) => deferred.reject(err));
+      env.stdout.on("data", (data) => {
+        envOutput += data;
+      });
+      env.on("close", () => {
+        deferred.resolve(envOutput.trim());
+      });
+      await deferred.promise;
+    } finally {
+      env.kill();
+      Deno.env.delete("BAZ");
+    }
+    const value = await deferred.promise;
+    assertEquals(value, "undefined");
   },
 });
 
@@ -855,3 +924,250 @@ Deno.test(
     assertEquals(output.stderr, null);
   },
 );
+
+Deno.test(
+  async function ipcSerialization() {
+    const timeout = withTimeout<void>();
+    const script = `
+      if (typeof process.send !== "function") {
+        console.error("process.send is not a function");
+        process.exit(1);
+      }
+
+      class BigIntWrapper {
+        constructor(value) {
+          this.value = value;
+        }
+        toJSON() {
+          return this.value.toString();
+        }
+      }
+
+      const makeSab = (arr) => {
+        const sab = new SharedArrayBuffer(arr.length);
+        const buf = new Uint8Array(sab);
+        for (let i = 0; i < arr.length; i++) {
+          buf[i] = arr[i];
+        }
+        return buf;
+      };
+
+
+      const inputs = [
+        "foo",
+        {
+          foo: "bar",
+        },
+        42,
+        true,
+        null,
+        new Uint8Array([1, 2, 3]),
+        {
+          foo: new Uint8Array([1, 2, 3]),
+          bar: makeSab([4, 5, 6]),
+        },
+        [1, { foo: 2 }, [3, 4]],
+        new BigIntWrapper(42n),
+      ];
+      for (const input of inputs) {
+        process.send(input);
+      }
+    `;
+    const file = await Deno.makeTempFile();
+    await Deno.writeTextFile(file, script);
+    const child = CP.fork(file, [], {
+      stdio: ["inherit", "inherit", "inherit", "ipc"],
+    });
+    const expect = [
+      "foo",
+      {
+        foo: "bar",
+      },
+      42,
+      true,
+      null,
+      [1, 2, 3],
+      {
+        foo: [1, 2, 3],
+        bar: [4, 5, 6],
+      },
+      [1, { foo: 2 }, [3, 4]],
+      "42",
+    ];
+    let i = 0;
+
+    child.on("message", (message) => {
+      assertEquals(message, expect[i]);
+      i++;
+    });
+    child.on("close", () => timeout.resolve());
+    await timeout.promise;
+    assertEquals(i, expect.length);
+  },
+);
+
+Deno.test(async function childProcessExitsGracefully() {
+  const testdataDir = path.join(
+    path.dirname(path.fromFileUrl(import.meta.url)),
+    "testdata",
+  );
+  const script = path.join(
+    testdataDir,
+    "node_modules",
+    "foo",
+    "index.js",
+  );
+  const p = Promise.withResolvers<void>();
+  const cp = CP.fork(script, [], {
+    cwd: testdataDir,
+    stdio: ["inherit", "inherit", "inherit", "ipc"],
+  });
+  cp.on("close", () => p.resolve());
+
+  await p.promise;
+});
+
+Deno.test(async function killMultipleTimesNoError() {
+  const loop = `
+    while (true) {
+      await new Promise((resolve) => setTimeout(resolve, 10000));
+    }
+  `;
+
+  const timeout = withTimeout<void>();
+  const file = await Deno.makeTempFile();
+  await Deno.writeTextFile(file, loop);
+  const child = CP.fork(file, [], {
+    stdio: ["inherit", "inherit", "inherit", "ipc"],
+  });
+  child.on("close", () => {
+    timeout.resolve();
+  });
+  child.kill();
+  child.kill();
+
+  // explicitly calling disconnect after kill should throw
+  assertThrows(() => child.disconnect());
+
+  await timeout.promise;
+});
+
+// Make sure that you receive messages sent before a "message" event listener is set up
+Deno.test(async function bufferMessagesIfNoListener() {
+  const code = `
+    process.on("message", (_) => {
+      process.channel.unref();
+    });
+    process.send("hello");
+    process.send("world");
+    console.error("sent messages");
+  `;
+  const file = await Deno.makeTempFile();
+  await Deno.writeTextFile(file, code);
+  const timeout = withTimeout<void>();
+  const child = CP.fork(file, [], {
+    stdio: ["inherit", "inherit", "pipe", "ipc"],
+  });
+
+  let got = 0;
+  child.on("message", (message) => {
+    if (got++ === 0) {
+      assertEquals(message, "hello");
+    } else {
+      assertEquals(message, "world");
+    }
+  });
+  child.on("close", () => {
+    timeout.resolve();
+  });
+  let stderr = "";
+  child.stderr?.on("data", (data) => {
+    stderr += data;
+    if (stderr.includes("sent messages")) {
+      // now that we've set up the listeners, and the child
+      // has sent the messages, we can let it exit
+      child.send("ready");
+    }
+  });
+  await timeout.promise;
+  assertEquals(got, 2);
+});
+
+Deno.test(async function sendAfterClosedThrows() {
+  const code = ``;
+  const file = await Deno.makeTempFile();
+  await Deno.writeTextFile(file, code);
+  const timeout = withTimeout<void>();
+  const child = CP.fork(file, [], {
+    stdio: ["inherit", "inherit", "inherit", "ipc"],
+  });
+  child.on("error", (err) => {
+    assert("code" in err);
+    assertEquals(err.code, "ERR_IPC_CHANNEL_CLOSED");
+    timeout.resolve();
+  });
+  child.on("close", () => {
+    child.send("ready");
+  });
+
+  await timeout.promise;
+});
+
+Deno.test(async function noWarningsFlag() {
+  const code = ``;
+  const file = await Deno.makeTempFile();
+  await Deno.writeTextFile(file, code);
+  const timeout = withTimeout<void>();
+  const child = CP.fork(file, [], {
+    execArgv: ["--no-warnings"],
+    stdio: ["inherit", "inherit", "inherit", "ipc"],
+  });
+  child.on("close", () => {
+    timeout.resolve();
+  });
+
+  await timeout.promise;
+});
+
+Deno.test({
+  name: "[node/child_process] spawnSync supports input option",
+  fn() {
+    const text = "  console.log('hello')";
+    const expected = `console.log("hello");\n`;
+    {
+      const { stdout } = spawnSync(Deno.execPath(), ["fmt", "-"], {
+        input: text,
+      });
+      assertEquals(stdout.toString(), expected);
+    }
+    {
+      const { stdout } = spawnSync(Deno.execPath(), ["fmt", "-"], {
+        input: Buffer.from(text),
+      });
+      assertEquals(stdout.toString(), expected);
+    }
+    {
+      const { stdout } = spawnSync(Deno.execPath(), ["fmt", "-"], {
+        input: new TextEncoder().encode(text),
+      });
+      assertEquals(stdout.toString(), expected);
+    }
+    {
+      const { stdout } = spawnSync(Deno.execPath(), ["fmt", "-"], {
+        input: new DataView(Buffer.from(text).buffer),
+      });
+      assertEquals(stdout.toString(), expected);
+    }
+
+    assertThrows(
+      () => {
+        spawnSync(Deno.execPath(), ["fmt", "-"], {
+          // deno-lint-ignore no-explicit-any
+          input: {} as any,
+        });
+      },
+      Error,
+      'The "input" argument must be of type string or an instance of Buffer, TypedArray, or DataView. Received an instance of Object',
+    );
+  },
+});

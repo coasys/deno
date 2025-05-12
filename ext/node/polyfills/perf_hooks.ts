@@ -1,4 +1,4 @@
-// Copyright 2018-2024 the Deno authors. All rights reserved. MIT license.
+// Copyright 2018-2025 the Deno authors. MIT license.
 
 // TODO(petamoriken): enable prefer-primordials for node polyfills
 // deno-lint-ignore-file prefer-primordials
@@ -8,13 +8,15 @@ import {
   performance as shimPerformance,
   PerformanceEntry,
 } from "ext:deno_web/15_performance.js";
+import { EldHistogram } from "ext:core/ops";
 
 class PerformanceObserver {
+  static supportedEntryTypes: string[] = [];
   observe() {
-    notImplemented("PerformanceObserver.observe");
+    // todo(lucacasonato): actually implement this
   }
   disconnect() {
-    notImplemented("PerformanceObserver.disconnect");
+    // todo(lucacasonato): actually implement this
   }
 }
 
@@ -26,8 +28,11 @@ const performance:
     "clearMeasures" | "getEntries"
   >
   & {
-    // deno-lint-ignore no-explicit-any
-    eventLoopUtilization: any;
+    eventLoopUtilization(): {
+      idle: number;
+      active: number;
+      utilization: number;
+    };
     nodeTiming: Record<string, string>;
     // deno-lint-ignore no-explicit-any
     timerify: any;
@@ -37,8 +42,10 @@ const performance:
     markResourceTiming: any;
   } = {
     clearMarks: (markName: string) => shimPerformance.clearMarks(markName),
-    eventLoopUtilization: () =>
-      notImplemented("eventLoopUtilization from performance"),
+    eventLoopUtilization: () => {
+      // TODO(@marvinhagemeister): Return actual non-stubbed values
+      return { idle: 0, active: 0, utilization: 0 };
+    },
     mark: (markName: string) => shimPerformance.mark(markName),
     measure: (
       measureName: string,
@@ -83,10 +90,11 @@ const performance:
     ) => shimPerformance.dispatchEvent(...args),
   };
 
-const monitorEventLoopDelay = () =>
-  notImplemented(
-    "monitorEventLoopDelay from performance",
-  );
+function monitorEventLoopDelay(options = {}) {
+  const { resolution = 10 } = options;
+
+  return new EldHistogram(resolution);
+}
 
 export default {
   performance,

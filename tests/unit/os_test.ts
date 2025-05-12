@@ -1,4 +1,4 @@
-// Copyright 2018-2024 the Deno authors. All rights reserved. MIT license.
+// Copyright 2018-2025 the Deno authors. MIT license.
 import {
   assert,
   assertEquals,
@@ -48,16 +48,16 @@ Deno.test({ permissions: { env: true } }, function avoidEmptyNamedEnv() {
   assertThrows(() => Deno.env.delete("a\0a"), TypeError);
 });
 
-Deno.test({ permissions: { env: false } }, function envPermissionDenied1() {
+Deno.test({ permissions: { env: false } }, function envPerm1() {
   assertThrows(() => {
     Deno.env.toObject();
-  }, Deno.errors.PermissionDenied);
+  }, Deno.errors.NotCapable);
 });
 
-Deno.test({ permissions: { env: false } }, function envPermissionDenied2() {
+Deno.test({ permissions: { env: false } }, function envPerm2() {
   assertThrows(() => {
     Deno.env.get("PATH");
-  }, Deno.errors.PermissionDenied);
+  }, Deno.errors.NotCapable);
 });
 
 // This test verifies that on Windows, environment variables are
@@ -79,7 +79,9 @@ Deno.test(
     ) => {
       const src = `
       console.log(
-        ${JSON.stringify(Object.keys(expectedEnv))}.map(k => Deno.env.get(k))
+        ${
+        JSON.stringify(Object.keys(expectedEnv))
+      }.map(k => Deno.env.get(k) ?? null)
       )`;
       const { success, stdout } = await new Deno.Command(Deno.execPath(), {
         args: ["eval", src],
@@ -172,7 +174,7 @@ Deno.test(
   async function osPpidIsEqualToPidOfParentProcess() {
     const decoder = new TextDecoder();
     const { stdout } = await new Deno.Command(Deno.execPath(), {
-      args: ["eval", "-p", "--unstable", "Deno.ppid"],
+      args: ["eval", "-p", "Deno.ppid"],
       env: { NO_COLOR: "true" },
     }).output();
 
@@ -191,10 +193,26 @@ Deno.test({ permissions: { read: false } }, function execPathPerm() {
     () => {
       Deno.execPath();
     },
-    Deno.errors.PermissionDenied,
+    Deno.errors.NotCapable,
     "Requires read access to <exec_path>, run again with the --allow-read flag",
   );
 });
+
+Deno.test(
+  {
+    ignore: Deno.build.os !== "linux",
+    permissions: { read: true, run: false },
+  },
+  function procRequiresAllowAll() {
+    assertThrows(
+      () => {
+        Deno.readTextFileSync("/proc/net/dev");
+      },
+      Deno.errors.NotCapable,
+      `Requires all access to "/proc/net/dev", run again with the --allow-all flag`,
+    );
+  },
+);
 
 Deno.test(
   { permissions: { sys: ["loadavg"] } },
@@ -207,7 +225,7 @@ Deno.test(
 Deno.test({ permissions: { sys: false } }, function loadavgPerm() {
   assertThrows(() => {
     Deno.loadavg();
-  }, Deno.errors.PermissionDenied);
+  }, Deno.errors.NotCapable);
 });
 
 Deno.test(
@@ -223,6 +241,11 @@ Deno.test(
   async function hostnameWithoutOtherNetworkUsages() {
     const { stdout } = await new Deno.Command(Deno.execPath(), {
       args: ["eval", "-p", "Deno.hostname()"],
+      env: {
+        LD_PRELOAD: "",
+        LD_LIBRARY_PATH: "",
+        DYLD_FALLBACK_LIBRARY_PATH: "",
+      },
     }).output();
     const hostname = new TextDecoder().decode(stdout).trim();
     assert(hostname.length > 0);
@@ -232,7 +255,7 @@ Deno.test(
 Deno.test({ permissions: { sys: false } }, function hostnamePerm() {
   assertThrows(() => {
     Deno.hostname();
-  }, Deno.errors.PermissionDenied);
+  }, Deno.errors.NotCapable);
 });
 
 Deno.test(
@@ -245,7 +268,7 @@ Deno.test(
 Deno.test({ permissions: { sys: false } }, function releasePerm() {
   assertThrows(() => {
     Deno.osRelease();
-  }, Deno.errors.PermissionDenied);
+  }, Deno.errors.NotCapable);
 });
 
 Deno.test({ permissions: { sys: ["osUptime"] } }, function osUptime() {
@@ -257,7 +280,7 @@ Deno.test({ permissions: { sys: ["osUptime"] } }, function osUptime() {
 Deno.test({ permissions: { sys: false } }, function osUptimePerm() {
   assertThrows(() => {
     Deno.osUptime();
-  }, Deno.errors.PermissionDenied);
+  }, Deno.errors.NotCapable);
 });
 
 Deno.test(
@@ -301,4 +324,71 @@ Deno.test(function memoryUsage() {
   assert(typeof mem.heapUsed === "number");
   assert(typeof mem.external === "number");
   assert(mem.rss >= mem.heapTotal);
+});
+
+Deno.test("Deno.exitCode getter and setter", () => {
+  // Initial value is 0
+  assertEquals(Deno.exitCode, 0);
+
+  try {
+    // Set a new value
+    Deno.exitCode = 5;
+    assertEquals(Deno.exitCode, 5);
+  } finally {
+    // Reset to initial value
+    Deno.exitCode = 0;
+  }
+
+  assertEquals(Deno.exitCode, 0);
+});
+
+Deno.test("Setting Deno.exitCode to non-number throws TypeError", () => {
+  // Throws on non-number values
+  assertThrows(
+    () => {
+      // @ts-expect-error Testing for runtime error
+      Deno.exitCode = "123";
+    },
+    TypeError,
+    "Exit code must be a number, got: 123 (string)",
+  );
+
+  // Throws on bigint values
+  assertThrows(
+    () => {
+      // @ts-expect-error Testing for runtime error
+      Deno.exitCode = 1n;
+    },
+    TypeError,
+    "Exit code must be a number, got: 1 (bigint)",
+  );
+});
+
+Deno.test("Setting Deno.exitCode to non-integer throws RangeError", () => {
+  // Throws on non-integer values
+  assertThrows(
+    () => {
+      Deno.exitCode = 3.14;
+    },
+    RangeError,
+    "Exit code must be an integer, got: 3.14",
+  );
+});
+
+Deno.test("Setting Deno.exitCode does not cause an immediate exit", () => {
+  let exited = false;
+
+  const originalExit = Deno.exit;
+  // @ts-expect-error; read-only
+  Deno.exit = () => {
+    exited = true;
+  };
+
+  try {
+    Deno.exitCode = 1;
+    assertEquals(exited, false);
+  } finally {
+    Deno.exit = originalExit;
+    Deno.exitCode = 0;
+  }
 });

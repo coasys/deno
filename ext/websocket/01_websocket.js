@@ -1,4 +1,4 @@
-// Copyright 2018-2024 the Deno authors. All rights reserved. MIT license.
+// Copyright 2018-2025 the Deno authors. MIT license.
 
 /// <reference path="../../core/internal.d.ts" />
 
@@ -25,7 +25,10 @@ const {
   ArrayBufferIsView,
   ArrayPrototypeJoin,
   ArrayPrototypeMap,
+  ArrayPrototypePush,
+  ArrayPrototypeShift,
   ArrayPrototypeSome,
+  Error,
   ErrorPrototypeToString,
   ObjectDefineProperties,
   ObjectPrototypeIsPrototypeOf,
@@ -41,7 +44,6 @@ const {
   SymbolFor,
   SymbolIterator,
   TypedArrayPrototypeGetByteLength,
-  Uint8Array,
 } = primordials;
 
 import { URL } from "ext:deno_url/00_url.js";
@@ -49,6 +51,7 @@ import * as webidl from "ext:deno_webidl/00_webidl.js";
 import { createFilteredInspectProxy } from "ext:deno_console/01_console.js";
 import { HTTP_TOKEN_CODE_POINT_RE } from "ext:deno_web/00_infra.js";
 import { DOMException } from "ext:deno_web/01_dom_exception.js";
+import { clearTimeout, setTimeout } from "ext:deno_web/02_timers.js";
 import {
   CloseEvent,
   defineEventHandler,
@@ -111,11 +114,15 @@ const _extensions = Symbol("[[extensions]]");
 const _protocol = Symbol("[[protocol]]");
 const _binaryType = Symbol("[[binaryType]]");
 const _eventLoop = Symbol("[[eventLoop]]");
+const _sendQueue = Symbol("[[sendQueue]]");
+const _queueSend = Symbol("[[queueSend]]");
+const _cancelHandle = Symbol("[[cancelHandle]]");
 
 const _server = Symbol("[[server]]");
 const _idleTimeoutDuration = Symbol("[[idleTimeout]]");
 const _idleTimeoutTimeout = Symbol("[[idleTimeoutTimeout]]");
 const _serverHandleIdleTimeout = Symbol("[[serverHandleIdleTimeout]]");
+
 class WebSocket extends EventTarget {
   constructor(url, protocols = []) {
     super();
@@ -129,6 +136,9 @@ class WebSocket extends EventTarget {
     this[_binaryType] = "blob";
     this[_idleTimeoutDuration] = 0;
     this[_idleTimeoutTimeout] = undefined;
+    this[_sendQueue] = [];
+    this[_cancelHandle] = undefined;
+
     const prefix = "Failed to construct 'WebSocket'";
     webidl.requiredArguments(arguments.length, 1, prefix);
     url = webidl.converters.USVString(url, prefix, "Argument 1");
@@ -154,26 +164,20 @@ class WebSocket extends EventTarget {
 
     if (wsURL.protocol !== "ws:" && wsURL.protocol !== "wss:") {
       throw new DOMException(
-        "Only ws & wss schemes are allowed in a WebSocket URL.",
+        `Only ws & wss schemes are allowed in a WebSocket URL: received ${wsURL.protocol}`,
         "SyntaxError",
       );
     }
 
     if (wsURL.hash !== "" || StringPrototypeEndsWith(wsURL.href, "#")) {
       throw new DOMException(
-        "Fragments are not allowed in a WebSocket URL.",
+        "Fragments are not allowed in a WebSocket URL",
         "SyntaxError",
       );
     }
 
     this[_url] = wsURL.href;
     this[_role] = CLIENT;
-
-    op_ws_check_permission_and_cancel_handle(
-      "WebSocket.abort()",
-      this[_url],
-      false,
-    );
 
     if (typeof protocols === "string") {
       protocols = [protocols];
@@ -188,7 +192,7 @@ class WebSocket extends EventTarget {
         )
     ) {
       throw new DOMException(
-        "Can't supply multiple times the same protocol.",
+        "Cannot supply multiple times the same protocol",
         "SyntaxError",
       );
     }
@@ -201,16 +205,25 @@ class WebSocket extends EventTarget {
       )
     ) {
       throw new DOMException(
-        "Invalid protocol value.",
+        "Invalid protocol value",
         "SyntaxError",
       );
     }
+
+    const cancelRid = op_ws_check_permission_and_cancel_handle(
+      "WebSocket.abort()",
+      this[_url],
+      true,
+    );
+
+    this[_cancelHandle] = cancelRid;
 
     PromisePrototypeThen(
       op_ws_create(
         "new WebSocket()",
         wsURL.href,
         ArrayPrototypeJoin(protocols, ", "),
+        cancelRid,
       ),
       (create) => {
         this[_rid] = create.rid;
@@ -247,6 +260,12 @@ class WebSocket extends EventTarget {
           { error: err, message: ErrorPrototypeToString(err) },
         );
         this.dispatchEvent(errorEv);
+
+        if (this[_cancelHandle]) {
+          core.tryClose(this[_cancelHandle]);
+
+          this[_cancelHandle] = undefined;
+        }
 
         const closeEv = new CloseEvent("close");
         this.dispatchEvent(closeEv);
@@ -322,26 +341,34 @@ class WebSocket extends EventTarget {
     webidl.requiredArguments(arguments.length, 1, prefix);
     data = webidl.converters.WebSocketSend(data, prefix, "Argument 1");
 
-    if (this[_readyState] !== OPEN) {
-      throw new DOMException("readyState not OPEN", "InvalidStateError");
+    if (this[_readyState] === CONNECTING) {
+      throw new DOMException("'readyState' not OPEN", "InvalidStateError");
     }
 
-    if (ArrayBufferIsView(data)) {
-      op_ws_send_binary(this[_rid], data);
-    } else if (isArrayBuffer(data)) {
-      op_ws_send_binary(this[_rid], new Uint8Array(data));
-    } else if (ObjectPrototypeIsPrototypeOf(BlobPrototype, data)) {
-      PromisePrototypeThen(
-        // deno-lint-ignore prefer-primordials
-        data.slice().arrayBuffer(),
-        (ab) => op_ws_send_binary_ab(this[_rid], ab),
-      );
+    if (this[_readyState] !== OPEN) {
+      return;
+    }
+
+    if (this[_sendQueue].length === 0) {
+      // Fast path if the send queue is empty, for example when only synchronous
+      // data is being sent.
+      if (ArrayBufferIsView(data)) {
+        op_ws_send_binary(this[_rid], data);
+      } else if (isArrayBuffer(data)) {
+        op_ws_send_binary_ab(this[_rid], data);
+      } else if (ObjectPrototypeIsPrototypeOf(BlobPrototype, data)) {
+        this[_queueSend](data);
+      } else {
+        const string = String(data);
+        op_ws_send_text(
+          this[_rid],
+          string,
+        );
+      }
     } else {
-      const string = String(data);
-      op_ws_send_text(
-        this[_rid],
-        string,
-      );
+      // Slower path if the send queue is not empty, for example when sending
+      // asynchronous data like a Blob.
+      this[_queueSend](data);
     }
   }
 
@@ -365,7 +392,7 @@ class WebSocket extends EventTarget {
         !(code === 1000 || (3000 <= code && code < 5000))
       ) {
         throw new DOMException(
-          "The close code must be either 1000 or in the range of 3000 to 4999.",
+          `The close code must be either 1000 or in the range of 3000 to 4999: received ${code}`,
           "InvalidAccessError",
         );
       }
@@ -376,9 +403,16 @@ class WebSocket extends EventTarget {
       TypedArrayPrototypeGetByteLength(core.encode(reason)) > 123
     ) {
       throw new DOMException(
-        "The close reason may not be longer than 123 bytes.",
+        "The close reason may not be longer than 123 bytes",
         "SyntaxError",
       );
+    }
+
+    if (this[_cancelHandle]) {
+      // Cancel ongoing handshake.
+      core.tryClose(this[_cancelHandle]);
+
+      this[_cancelHandle] = undefined;
     }
 
     if (this[_readyState] === CONNECTING) {
@@ -413,6 +447,18 @@ class WebSocket extends EventTarget {
     const rid = this[_rid];
     while (this[_readyState] !== CLOSED) {
       const kind = await op_ws_next_event(rid);
+      /* close the connection if read was cancelled, and we didn't get a close frame */
+      if (
+        (this[_readyState] == CLOSING) &&
+        kind <= 3 && this[_role] !== CLIENT
+      ) {
+        this[_readyState] = CLOSED;
+
+        const event = new CloseEvent("close");
+        this.dispatchEvent(event);
+        core.tryClose(rid);
+        break;
+      }
 
       switch (kind) {
         case 0: {
@@ -465,8 +511,11 @@ class WebSocket extends EventTarget {
           /* error */
           this[_readyState] = CLOSED;
 
+          const message = op_ws_get_error(rid);
+          const error = new Error(message);
           const errorEv = new ErrorEvent("error", {
-            message: op_ws_get_error(rid),
+            error,
+            message,
           });
           this.dispatchEvent(errorEv);
 
@@ -505,6 +554,38 @@ class WebSocket extends EventTarget {
           break;
         }
       }
+    }
+  }
+
+  async [_queueSend](data) {
+    const queue = this[_sendQueue];
+
+    ArrayPrototypePush(queue, data);
+
+    if (queue.length > 1) {
+      // There is already a send in progress, so we just push to the queue
+      // and let that task handle sending of this data.
+      return;
+    }
+
+    while (queue.length > 0) {
+      const data = queue[0];
+      if (ArrayBufferIsView(data)) {
+        op_ws_send_binary(this[_rid], data);
+      } else if (isArrayBuffer(data)) {
+        op_ws_send_binary_ab(this[_rid], data);
+      } else if (ObjectPrototypeIsPrototypeOf(BlobPrototype, data)) {
+        // deno-lint-ignore prefer-primordials
+        const ab = await data.slice().arrayBuffer();
+        op_ws_send_binary_ab(this[_rid], ab);
+      } else {
+        const string = String(data);
+        op_ws_send_text(
+          this[_rid],
+          string,
+        );
+      }
+      ArrayPrototypeShift(queue);
     }
   }
 
@@ -572,15 +653,19 @@ class WebSocket extends EventTarget {
 
 ObjectDefineProperties(WebSocket, {
   CONNECTING: {
+    __proto__: null,
     value: 0,
   },
   OPEN: {
+    __proto__: null,
     value: 1,
   },
   CLOSING: {
+    __proto__: null,
     value: 2,
   },
   CLOSED: {
+    __proto__: null,
     value: 3,
   },
 });
@@ -608,6 +693,7 @@ function createWebSocketBranded() {
   socket[_binaryType] = "arraybuffer";
   socket[_idleTimeoutDuration] = 0;
   socket[_idleTimeoutTimeout] = undefined;
+  socket[_sendQueue] = [];
   return socket;
 }
 

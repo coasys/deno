@@ -1,10 +1,12 @@
-// Copyright 2018-2024 the Deno authors. All rights reserved. MIT license.
+// Copyright 2018-2025 the Deno authors. MIT license.
 
-use crate::tests_path;
+use std::collections::BTreeMap;
+use std::collections::HashMap;
+use std::convert::Infallible;
+use std::net::SocketAddr;
+use std::path::Path;
+use std::sync::Mutex;
 
-use super::run_server;
-use super::ServerKind;
-use super::ServerOptions;
 use base64::engine::general_purpose::STANDARD_NO_PAD;
 use base64::Engine as _;
 use bytes::Bytes;
@@ -17,12 +19,11 @@ use hyper::Response;
 use hyper::StatusCode;
 use once_cell::sync::Lazy;
 use serde_json::json;
-use std::collections::BTreeMap;
-use std::collections::HashMap;
-use std::convert::Infallible;
-use std::net::SocketAddr;
-use std::path::Path;
-use std::sync::Mutex;
+
+use super::run_server;
+use super::ServerKind;
+use super::ServerOptions;
+use crate::tests_path;
 
 pub async fn registry_server(port: u16) {
   let registry_server_addr = SocketAddr::from(([127, 0, 0, 1], port));
@@ -139,10 +140,21 @@ async fn registry_server_handler(
     return Ok(res);
   }
 
+  let accept_header = req
+    .headers()
+    .get("accept")
+    .and_then(|s| s.to_str().ok())
+    .unwrap_or_default();
+  if accept_header != "*/*" {
+    let res = Response::builder()
+      .status(StatusCode::BAD_REQUEST)
+      .body(UnsyncBoxBody::new(Empty::new()))?;
+    return Ok(res);
+  }
   // serve the registry package files
   let mut file_path = tests_path().join("registry").join("jsr").to_path_buf();
   file_path.push(
-    &req.uri().path()[1..]
+    req.uri().path()[1..]
       .replace("%2f", "/")
       .replace("%2F", "/"),
   );

@@ -1,20 +1,25 @@
-// Copyright 2018-2024 the Deno authors. All rights reserved. MIT license.
+// Copyright 2018-2025 the Deno authors. MIT license.
+
+// deno-lint-ignore-file no-console
+
 import {
   dirname,
+  extname,
   fromFileUrl,
   join,
   resolve,
   toFileUrl,
-} from "../tests/util/std/path/mod.ts";
+} from "@std/path";
 import { wait } from "https://deno.land/x/wait@0.1.13/mod.ts";
-export { dirname, fromFileUrl, join, resolve, toFileUrl };
-export { existsSync, walk } from "../tests/util/std/fs/mod.ts";
-export { TextLineStream } from "../tests/util/std/streams/text_line_stream.ts";
-export { delay } from "../tests/util/std/async/delay.ts";
+export { dirname, extname, fromFileUrl, join, resolve, toFileUrl };
+export { existsSync, expandGlobSync, walk } from "@std/fs";
+export { TextLineStream } from "@std/streams/text-line-stream";
+export { delay } from "@std/async/delay";
+export { parse as parseJSONC } from "@std/jsonc/parse";
 
 // [toolName] --version output
 const versions = {
-  "dlint": "dlint 0.52.2",
+  "dlint": "dlint 0.73.0",
 };
 
 const compressed = new Set(["ld64.lld", "rcodesign"]);
@@ -31,11 +36,17 @@ async function getFilesFromGit(baseDir, args) {
     throw new Error("gitLsFiles failed");
   }
 
-  const files = output.split("\0").filter((line) => line.length > 0).map(
-    (filePath) => {
-      return Deno.realPathSync(join(baseDir, filePath));
-    },
-  );
+  const files = output
+    .split("\0")
+    .filter((line) => line.length > 0)
+    .map((filePath) => {
+      try {
+        return Deno.realPathSync(join(baseDir, filePath));
+      } catch {
+        return null;
+      }
+    })
+    .filter((filePath) => filePath !== null);
 
   return files;
 }
@@ -175,7 +186,7 @@ export function getPrebuiltToolPath(toolName) {
   return join(PREBUILT_TOOL_DIR, toolName + executableSuffix);
 }
 
-const commitId = "5f2097d8247c7fbe30ba227f894d70ae5c1524c7";
+const commitId = "aa25a37b0f2bdadc83e99e625e8a074d56d1febd";
 const downloadUrl =
   `https://raw.githubusercontent.com/denoland/deno_third_party/${commitId}/prebuilt/${platformDirName}`;
 
@@ -227,6 +238,12 @@ export async function downloadPrebuilt(toolName) {
       );
     }
     spinner.text = `Successfully downloaded: ${toolName}`;
+    try {
+      // necessary on Windows it seems
+      await Deno.remove(toolPath);
+    } catch {
+      // ignore
+    }
     await Deno.rename(tempFile, toolPath);
   } catch (e) {
     spinner.fail();

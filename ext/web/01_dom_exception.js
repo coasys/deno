@@ -1,22 +1,23 @@
-// Copyright 2018-2024 the Deno authors. All rights reserved. MIT license.
+// Copyright 2018-2025 the Deno authors. MIT license.
 
 // @ts-check
 /// <reference path="../../core/internal.d.ts" />
 /// <reference path="../../core/lib.deno_core.d.ts" />
 /// <reference path="../webidl/internal.d.ts" />
 /// <reference path="../web/internal.d.ts" />
-/// <reference path="../web/lib.deno_web.d.ts" />
+/// <reference path="../../cli/tsc/dts/lib.deno_web.d.ts" />
 
 import { primordials } from "ext:core/mod.js";
 const {
-  ArrayPrototypeSlice,
   Error,
   ErrorPrototype,
   ObjectDefineProperty,
   ObjectCreate,
   ObjectEntries,
+  ObjectHasOwn,
   ObjectPrototypeIsPrototypeOf,
   ObjectSetPrototypeOf,
+  ReflectConstruct,
   Symbol,
   SymbolFor,
 } = primordials;
@@ -27,7 +28,6 @@ import { createFilteredInspectProxy } from "ext:deno_console/01_console.js";
 const _name = Symbol("name");
 const _message = Symbol("message");
 const _code = Symbol("code");
-const _error = Symbol("error");
 
 // Defined in WebIDL 4.3.
 // https://webidl.spec.whatwg.org/#idl-DOMException
@@ -108,13 +108,14 @@ class DOMException {
     );
     const code = nameToCodeMapping[name] ?? 0;
 
-    this[_message] = message;
-    this[_name] = name;
-    this[_code] = code;
-    this[webidl.brand] = webidl.brand;
+    // execute Error constructor to have stack property and [[ErrorData]] internal slot
+    const error = ReflectConstruct(Error, [], new.target);
+    error[_message] = message;
+    error[_name] = name;
+    error[_code] = code;
+    error[webidl.brand] = webidl.brand;
 
-    this[_error] = new Error(message);
-    this[_error].name = "DOMException";
+    return error;
   }
 
   get message() {
@@ -133,49 +134,26 @@ class DOMException {
   }
 
   [SymbolFor("Deno.privateCustomInspect")](inspect, inspectOptions) {
-    if (ObjectPrototypeIsPrototypeOf(DOMExceptionPrototype, this)) {
-      return this[_error].stack;
-    } else {
-      return inspect(
-        createFilteredInspectProxy({
-          object: this,
-          evaluate: false,
-          keys: [
-            "message",
-            "name",
-            "code",
-          ],
-        }),
-        inspectOptions,
-      );
+    if (ObjectHasOwn(this, "stack")) {
+      const stack = this.stack;
+      if (typeof stack === "string") {
+        return stack;
+      }
     }
+    return inspect(
+      createFilteredInspectProxy({
+        object: this,
+        evaluate: ObjectPrototypeIsPrototypeOf(DOMExceptionPrototype, this),
+        keys: [
+          "message",
+          "name",
+          "code",
+        ],
+      }),
+      inspectOptions,
+    );
   }
 }
-
-ObjectDefineProperty(DOMException.prototype, "stack", {
-  get() {
-    return this[_error].stack;
-  },
-  set(value) {
-    this[_error].stack = value;
-  },
-  configurable: true,
-});
-
-// `DOMException` isn't a native error, so `Error.prepareStackTrace()` is
-// not called when accessing `.stack`, meaning our structured stack trace
-// hack doesn't apply. This patches it in.
-ObjectDefineProperty(DOMException.prototype, "__callSiteEvals", {
-  get() {
-    // Call the stack getter so `__callSiteEvals` get populated.
-    this[_error].stack;
-    // To be extra sure, use an empty array if `__callSiteEvals` is still not there,
-    // eg. if the user overrides `Error.prepareStackTrace`.
-    const callSiteEvals = this[_error].__callSiteEvals ?? [];
-    return ArrayPrototypeSlice(callSiteEvals, 1);
-  },
-  configurable: true,
-});
 
 ObjectSetPrototypeOf(DOMException.prototype, ErrorPrototype);
 
@@ -211,7 +189,7 @@ const entries = ObjectEntries({
 });
 for (let i = 0; i < entries.length; ++i) {
   const { 0: key, 1: value } = entries[i];
-  const desc = { value, enumerable: true };
+  const desc = { __proto__: null, value, enumerable: true };
   ObjectDefineProperty(DOMException, key, desc);
   ObjectDefineProperty(DOMException.prototype, key, desc);
 }

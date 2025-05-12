@@ -1,4 +1,4 @@
-// Copyright 2018-2024 the Deno authors. All rights reserved. MIT license.
+// Copyright 2018-2025 the Deno authors. MIT license.
 
 use std::cell::RefCell;
 use std::collections::HashMap;
@@ -28,10 +28,12 @@ use crate::fs::PathRef;
 use crate::http_server;
 use crate::jsr_registry_unset_url;
 use crate::lsp::LspClientBuilder;
+use crate::nodejs_org_mirror_unset_url;
 use crate::npm_registry_unset_url;
 use crate::pty::Pty;
 use crate::strip_ansi_codes;
 use crate::testdata_path;
+use crate::tests_path;
 use crate::HttpServerGuard;
 use crate::TempDir;
 
@@ -77,6 +79,7 @@ impl DiagnosticLogger {
         logger.write_all(text.as_ref().as_bytes()).unwrap();
         logger.write_all(b"\n").unwrap();
       }
+      #[allow(clippy::print_stderr)]
       None => eprintln!("{}", text.as_ref()),
     }
   }
@@ -88,6 +91,7 @@ pub struct TestContextBuilder {
   use_http_server: bool,
   use_temp_cwd: bool,
   use_symlinked_temp_dir: bool,
+  use_canonicalized_temp_dir: bool,
   /// Copies the files at the specified directory in the "testdata" directory
   /// to the temp folder and runs the test from there. This is useful when
   /// the test creates files in the testdata directory (ex. a node_modules folder)
@@ -142,6 +146,23 @@ impl TestContextBuilder {
     self
   }
 
+  /// Causes the temp directory to go to its canonicalized path instead
+  /// of being in a symlinked temp dir on the CI.
+  ///
+  /// Note: This method is not actually deprecated. It's just deprecated
+  /// to discourage its use. Use it sparingly and document why you're using
+  /// it. You better have a good reason other than being lazy!
+  ///
+  /// If your tests are failing because the temp dir is symlinked on the CI,
+  /// then it likely means your code doesn't properly handle when Deno is running
+  /// in a symlinked directory. That's a bug and you should fix it without using
+  /// this.
+  #[deprecated]
+  pub fn use_canonicalized_temp_dir(mut self) -> Self {
+    self.use_canonicalized_temp_dir = true;
+    self
+  }
+
   /// Copies the files at the specified directory in the "testdata" directory
   /// to the temp folder and runs the test from there. This is useful when
   /// the test creates files in the testdata directory (ex. a node_modules folder)
@@ -189,11 +210,6 @@ impl TestContextBuilder {
     self
   }
 
-  pub fn add_future_env_vars(mut self) -> Self {
-    self = self.env("DENO_FUTURE", "1");
-    self
-  }
-
   pub fn add_jsr_env_vars(mut self) -> Self {
     for (key, value) in env_vars_for_jsr_tests() {
       self = self.env(key, value);
@@ -206,13 +222,21 @@ impl TestContextBuilder {
       panic!("{}", err);
     }
 
-    let temp_dir_path = self
-      .temp_dir_path
-      .clone()
-      .unwrap_or_else(std::env::temp_dir);
-    let deno_dir = TempDir::new_in(&temp_dir_path);
-    let temp_dir = TempDir::new_in(&temp_dir_path);
+    let temp_dir_path = PathRef::new(
+      self
+        .temp_dir_path
+        .clone()
+        .unwrap_or_else(std::env::temp_dir),
+    );
+    let temp_dir_path = if self.use_canonicalized_temp_dir {
+      temp_dir_path.canonicalize()
+    } else {
+      temp_dir_path
+    };
+    let deno_dir = TempDir::new_in(temp_dir_path.as_path());
+    let temp_dir = TempDir::new_in(temp_dir_path.as_path());
     let temp_dir = if self.use_symlinked_temp_dir {
+      assert!(!self.use_canonicalized_temp_dir); // code doesn't handle using both of these
       TempDir::new_symlinked(temp_dir)
     } else {
       temp_dir
@@ -301,6 +325,15 @@ impl TestContext {
     builder
   }
 
+  pub fn run_deno(&self, args: impl AsRef<str>) {
+    self
+      .new_command()
+      .name("deno")
+      .args(args)
+      .run()
+      .skip_output_check();
+  }
+
   pub fn run_npm(&self, args: impl AsRef<str>) {
     self
       .new_command()
@@ -326,16 +359,22 @@ impl TestContext {
 }
 
 fn sync_fetch(url: url::Url) -> bytes::Bytes {
-  let runtime = tokio::runtime::Builder::new_current_thread()
-    .enable_io()
-    .enable_time()
-    .build()
-    .unwrap();
-  runtime.block_on(async move {
-    let client = reqwest::Client::new();
-    let response = client.get(url).send().await.unwrap();
-    assert!(response.status().is_success());
-    response.bytes().await.unwrap()
+  std::thread::scope(move |s| {
+    s.spawn(move || {
+      let runtime = tokio::runtime::Builder::new_current_thread()
+        .enable_io()
+        .enable_time()
+        .build()
+        .unwrap();
+      runtime.block_on(async move {
+        let client = reqwest::Client::new();
+        let response = client.get(url).send().await.unwrap();
+        assert!(response.status().is_success());
+        response.bytes().await.unwrap()
+      })
+    })
+    .join()
+    .unwrap()
   })
 }
 
@@ -387,7 +426,7 @@ pub struct TestCommandBuilder {
   args_text: String,
   args_vec: Vec<String>,
   split_output: bool,
-  debug_output: bool,
+  show_output: bool,
 }
 
 impl TestCommandBuilder {
@@ -407,7 +446,7 @@ impl TestCommandBuilder {
       command_name: "deno".to_string(),
       args_text: "".to_string(),
       args_vec: Default::default(),
-      debug_output: false,
+      show_output: false,
     }
   }
 
@@ -489,8 +528,8 @@ impl TestCommandBuilder {
   /// Not deprecated, this is just here so you don't accidentally
   /// commit code with this enabled.
   #[deprecated]
-  pub fn debug_output(mut self) -> Self {
-    self.debug_output = true;
+  pub fn show_output(mut self) -> Self {
+    self.show_output = true;
     self
   }
 
@@ -662,15 +701,15 @@ impl TestCommandBuilder {
       let (stderr_reader, stderr_writer) = pipe().unwrap();
       command.stdout(stdout_writer);
       command.stderr(stderr_writer);
-      let debug_output = self.debug_output;
+      let show_output = self.show_output;
       (
         None,
         Some((
           std::thread::spawn(move || {
-            read_pipe_to_string(stdout_reader, debug_output)
+            read_pipe_to_string(stdout_reader, show_output)
           }),
           std::thread::spawn(move || {
-            read_pipe_to_string(stderr_reader, debug_output)
+            read_pipe_to_string(stderr_reader, show_output)
           }),
         )),
       )
@@ -695,7 +734,7 @@ impl TestCommandBuilder {
     drop(command);
 
     let combined = combined_reader.map(|pipe| {
-      sanitize_output(read_pipe_to_string(pipe, self.debug_output), &args)
+      sanitize_output(read_pipe_to_string(pipe, self.show_output), &args)
     });
 
     let status = process.wait().unwrap();
@@ -820,6 +859,12 @@ impl TestCommandBuilder {
     if !envs.contains_key("JSR_URL") {
       envs.insert("JSR_URL".to_string(), jsr_registry_unset_url());
     }
+    if !envs.contains_key("NODEJS_ORG_MIRROR") {
+      envs.insert(
+        "NODEJS_ORG_MIRROR".to_string(),
+        nodejs_org_mirror_unset_url(),
+      );
+    }
     for key in &self.envs_remove {
       envs.remove(key);
     }
@@ -837,6 +882,7 @@ impl TestCommandBuilder {
     text
       .replace("$DENO_DIR", &self.deno_dir.path().to_string_lossy())
       .replace("$TESTDATA", &testdata_path().to_string_lossy())
+      .replace("$TESTS", &tests_path().to_string_lossy())
       .replace("$PWD", &cwd.to_string_lossy())
   }
 }

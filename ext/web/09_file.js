@@ -1,4 +1,4 @@
-// Copyright 2018-2024 the Deno authors. All rights reserved. MIT license.
+// Copyright 2018-2025 the Deno authors. MIT license.
 
 // @ts-check
 /// <reference no-default-lib="true" />
@@ -6,7 +6,7 @@
 /// <reference path="../../core/internal.d.ts" />
 /// <reference path="../webidl/internal.d.ts" />
 /// <reference path="../web/internal.d.ts" />
-/// <reference path="../web/lib.deno_web.d.ts" />
+/// <reference path="../../cli/tsc/dts/lib.deno_web.d.ts" />
 /// <reference path="./internal.d.ts" />
 /// <reference lib="esnext" />
 
@@ -387,14 +387,9 @@ class Blob {
   }
 
   /**
-   * @returns {Promise<string>}
+   * @param {number} size
+   * @returns {Promise<Uint8Array>}
    */
-  async text() {
-    webidl.assertBranded(this, BlobPrototype);
-    const buffer = await this.#u8Array(this.size);
-    return core.decode(buffer);
-  }
-
   async #u8Array(size) {
     const bytes = new Uint8Array(size);
     const partIterator = toIterator(this[_parts]);
@@ -414,12 +409,29 @@ class Blob {
   }
 
   /**
+   * @returns {Promise<string>}
+   */
+  async text() {
+    webidl.assertBranded(this, BlobPrototype);
+    const buffer = await this.#u8Array(this.size);
+    return core.decode(buffer);
+  }
+
+  /**
    * @returns {Promise<ArrayBuffer>}
    */
   async arrayBuffer() {
     webidl.assertBranded(this, BlobPrototype);
     const buf = await this.#u8Array(this.size);
     return TypedArrayPrototypeGetBuffer(buf);
+  }
+
+  /**
+   * @returns {Promise<Uint8Array>}
+   */
+  async bytes() {
+    webidl.assertBranded(this, BlobPrototype);
+    return await this.#u8Array(this.size);
   }
 
   [SymbolFor("Deno.privateCustomInspect")](inspect, inspectOptions) {
@@ -706,6 +718,10 @@ function revokeObjectURL(url) {
 URL.createObjectURL = createObjectURL;
 URL.revokeObjectURL = revokeObjectURL;
 
+function isBlob(obj) {
+  return ObjectPrototypeIsPrototypeOf(BlobPrototype, obj);
+}
+
 export {
   Blob,
   blobFromObjectUrl,
@@ -713,4 +729,5 @@ export {
   File,
   FilePrototype,
   getParts,
+  isBlob,
 };

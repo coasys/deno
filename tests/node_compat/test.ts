@@ -1,4 +1,6 @@
-// Copyright 2018-2024 the Deno authors. All rights reserved. MIT license.
+// Copyright 2018-2025 the Deno authors. MIT license.
+
+// deno-lint-ignore-file no-console
 
 /**
  * This script will run the test files specified in the configuration file.
@@ -13,14 +15,16 @@
  * all share the same working directory.
  */
 
-import { magenta } from "@std/fmt/colors.ts";
-import { pooledMap } from "@std/async/pool.ts";
-import { dirname, fromFileUrl, join } from "@std/path/mod.ts";
-import { fail } from "@std/assert/mod.ts";
+import { magenta } from "@std/fmt/colors";
+import { pooledMap } from "@std/async/pool";
+import { dirname, fromFileUrl, join } from "@std/path";
+import { assertEquals, fail } from "@std/assert";
+import { distinct } from "@std/collections";
 import {
   config,
   getPathsFromTestSuites,
   partitionParallelTestPaths,
+  runNodeCompatTestCase,
 } from "./common.ts";
 
 // If the test case is invoked like
@@ -30,9 +34,13 @@ const filters = Deno.args;
 const hasFilters = filters.length > 0;
 const toolsPath = dirname(fromFileUrl(import.meta.url));
 const testPaths = partitionParallelTestPaths(
-  getPathsFromTestSuites(config.tests),
+  getPathsFromTestSuites(config.tests).concat(
+    getPathsFromTestSuites(config.ignore),
+  ),
 );
-const cwd = new URL(".", import.meta.url);
+testPaths.sequential = distinct(testPaths.sequential);
+testPaths.parallel = distinct(testPaths.parallel);
+
 const windowsIgnorePaths = new Set(
   getPathsFromTestSuites(config.windowsIgnore),
 );
@@ -41,7 +49,6 @@ const darwinIgnorePaths = new Set(
 );
 
 const decoder = new TextDecoder();
-let testSerialId = 0;
 
 async function runTest(t: Deno.TestContext, path: string): Promise<void> {
   // If filter patterns are given and any pattern doesn't match
@@ -63,50 +70,7 @@ async function runTest(t: Deno.TestContext, path: string): Promise<void> {
     sanitizeExit: false,
     fn: async () => {
       const testCase = join(toolsPath, "test", path);
-
-      const v8Flags = ["--stack-size=4000"];
-      const testSource = await Deno.readTextFile(testCase);
-      const envVars: Record<string, string> = {};
-      // TODO(kt3k): Parse `Flags` directive correctly
-      if (testSource.includes("Flags: --expose_externalize_string")) {
-        v8Flags.push("--expose-externalize-string");
-        // TODO(bartlomieju): disable verifying globals if that V8 flag is
-        // present. Even though we should be able to pass a list of globals
-        // that are allowed, it doesn't work, because the list is expected to
-        // contain actual JS objects, not strings :)).
-        envVars["NODE_TEST_KNOWN_GLOBALS"] = "0";
-      }
-      // TODO(nathanwhit): once we match node's behavior on executing
-      // `node:test` tests when we run a file, we can remove this
-      const usesNodeTest = testSource.includes("node:test");
-      const args = [
-        usesNodeTest ? "test" : "run",
-        "-A",
-        "--quiet",
-        //"--unsafely-ignore-certificate-errors",
-        "--unstable-unsafe-proto",
-        "--unstable-bare-node-builtins",
-        "--v8-flags=" + v8Flags.join(),
-      ];
-      if (usesNodeTest) {
-        // deno test typechecks by default + we want to pass script args
-        args.push("--no-check", "runner.ts", "--", testCase);
-      } else {
-        args.push("runner.ts", testCase);
-      }
-
-      // Pipe stdout in order to output each test result as Deno.test output
-      // That way the tests will respect the `--quiet` option when provided
-      const command = new Deno.Command(Deno.execPath(), {
-        args,
-        env: {
-          TEST_SERIAL_ID: String(testSerialId++),
-          ...envVars,
-        },
-        cwd,
-        stdout: "piped",
-        stderr: "piped",
-      }).spawn();
+      const command = await runNodeCompatTestCase(testCase);
       const warner = setTimeout(() => {
         console.error(`Test is running slow: ${testCase}`);
       }, 2 * 60_000);
@@ -128,7 +92,7 @@ async function runTest(t: Deno.TestContext, path: string): Promise<void> {
         }
         const stderrOutput = decoder.decode(stderr);
         const repeatCmd = magenta(
-          `./target/debug/deno test -A tests/node_compat/test.ts -- ${path}`,
+          `./target/debug/deno test --config tests/config/deno.json -A tests/node_compat/test.ts -- ${path}`,
         );
         const msg = `"${magenta(path)}" failed:
 
@@ -169,12 +133,14 @@ Deno.test("Node.js compatibility", async (t) => {
 function checkConfigTestFilesOrder(testFileLists: Array<string[]>) {
   for (const testFileList of testFileLists) {
     const sortedTestList = JSON.parse(JSON.stringify(testFileList));
-    sortedTestList.sort();
-    if (JSON.stringify(testFileList) !== JSON.stringify(sortedTestList)) {
-      throw new Error(
-        `File names in \`config.json\` are not correct order.`,
-      );
-    }
+    sortedTestList.sort((a: string, b: string) =>
+      a.toLowerCase().localeCompare(b.toLowerCase())
+    );
+    assertEquals(
+      testFileList,
+      sortedTestList,
+      "File names in `config.json` are not correct order.",
+    );
   }
 }
 

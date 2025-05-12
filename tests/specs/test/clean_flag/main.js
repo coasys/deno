@@ -1,8 +1,8 @@
-import { emptyDir } from "../../../util/std/fs/empty_dir.ts";
+import { emptyDir } from "@std/fs/empty-dir";
 
 const DIR = "./coverage";
 const COMMAND = new Deno.Command(Deno.execPath(), {
-  args: ["test", "--coverage", "--clean"],
+  args: ["test", "--coverage", "--clean", "--coverage-raw-data-only"],
   stdout: "null",
 });
 

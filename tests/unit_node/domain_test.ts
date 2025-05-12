@@ -1,10 +1,10 @@
-// Copyright 2018-2024 the Deno authors. All rights reserved. MIT license.
+// Copyright 2018-2025 the Deno authors. MIT license.
 // Copyright © Benjamin Lupton
 // This code has been forked by https://github.com/bevry/domain-browser/commit/8bce7f4a093966ca850da75b024239ad5d0b33c6
 
 import domain from "node:domain";
 import { EventEmitter } from "node:events";
-import { assertEquals } from "@std/assert/mod.ts";
+import { assertEquals } from "@std/assert";
 
 Deno.test("should work on throws", async function () {
   const deferred = Promise.withResolvers<void>();

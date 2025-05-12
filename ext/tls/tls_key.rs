@@ -1,4 +1,4 @@
-// Copyright 2018-2024 the Deno authors. All rights reserved. MIT license.
+// Copyright 2018-2025 the Deno authors. MIT license.
 
 //! These represent the various types of TLS keys we support for both client and server
 //! connections.
@@ -11,33 +11,51 @@
 //! key lookup can handle closing one end of the pair, in which case they will just
 //! attempt to clean up the associated resources.
 
-use crate::Certificate;
-use crate::PrivateKey;
-use deno_core::anyhow::anyhow;
-use deno_core::error::AnyError;
-use deno_core::futures::future::poll_fn;
-use deno_core::futures::future::Either;
-use deno_core::futures::FutureExt;
-use deno_core::unsync::spawn;
-use rustls::ServerConfig;
-use rustls_tokio_stream::ServerConfigProvider;
 use std::cell::RefCell;
 use std::collections::HashMap;
 use std::fmt::Debug;
+use std::future::poll_fn;
 use std::future::ready;
 use std::future::Future;
 use std::io::ErrorKind;
 use std::rc::Rc;
 use std::sync::Arc;
+
+use deno_core::futures::future::Either;
+use deno_core::futures::FutureExt;
+use deno_core::unsync::spawn;
+use rustls::ServerConfig;
+use rustls_tokio_stream::ServerConfigProvider;
 use tokio::sync::broadcast;
 use tokio::sync::mpsc;
 use tokio::sync::oneshot;
+use webpki::types::CertificateDer;
+use webpki::types::PrivateKeyDer;
 
-type ErrorType = Rc<AnyError>;
+#[derive(Debug, thiserror::Error)]
+pub enum TlsKeyError {
+  #[error(transparent)]
+  Rustls(#[from] rustls::Error),
+  #[error("Failed: {0}")]
+  Failed(ErrorType),
+  #[error(transparent)]
+  JoinError(#[from] tokio::task::JoinError),
+  #[error(transparent)]
+  RecvError(#[from] tokio::sync::broadcast::error::RecvError),
+}
+
+type ErrorType = Arc<Box<str>>;
 
 /// A TLS certificate/private key pair.
-#[derive(Clone, Debug, PartialEq, Eq)]
-pub struct TlsKey(pub Vec<Certificate>, pub PrivateKey);
+/// see https://docs.rs/rustls-pki-types/latest/rustls_pki_types/#cloning-private-keys
+#[derive(Debug, PartialEq, Eq)]
+pub struct TlsKey(pub Vec<CertificateDer<'static>>, pub PrivateKeyDer<'static>);
+
+impl Clone for TlsKey {
+  fn clone(&self) -> Self {
+    Self(self.0.clone(), self.1.clone_key())
+  }
+}
 
 #[derive(Clone, Debug, Default)]
 pub enum TlsKeys {
@@ -49,6 +67,12 @@ pub enum TlsKeys {
 }
 
 pub struct TlsKeysHolder(RefCell<TlsKeys>);
+
+impl deno_core::GarbageCollected for TlsKeysHolder {
+  fn get_name(&self) -> &'static std::ffi::CStr {
+    c"TlsKeyHolder"
+  }
+}
 
 impl TlsKeysHolder {
   pub fn take(&self) -> TlsKeys {
@@ -105,13 +129,12 @@ impl TlsKeyResolver {
     &self,
     sni: String,
     alpn: Vec<Vec<u8>>,
-  ) -> Result<Arc<ServerConfig>, AnyError> {
+  ) -> Result<Arc<ServerConfig>, TlsKeyError> {
     let key = self.resolve(sni).await?;
 
     let mut tls_config = ServerConfig::builder()
-      .with_safe_defaults()
       .with_no_client_auth()
-      .with_single_cert(key.0, key.1)?;
+      .with_single_cert(key.0, key.1.clone_key())?;
     tls_config.alpn_protocols = alpn;
     Ok(tls_config.into())
   }
@@ -175,7 +198,7 @@ impl TlsKeyResolver {
   pub fn resolve(
     &self,
     sni: String,
-  ) -> impl Future<Output = Result<TlsKey, AnyError>> {
+  ) -> impl Future<Output = Result<TlsKey, TlsKeyError>> {
     let mut cache = self.inner.cache.borrow_mut();
     let mut recv = match cache.get(&sni) {
       None => {
@@ -186,7 +209,7 @@ impl TlsKeyResolver {
       }
       Some(TlsKeyState::Resolving(recv)) => recv.resubscribe(),
       Some(TlsKeyState::Resolved(res)) => {
-        return Either::Left(ready(res.clone().map_err(|_| anyhow!("Failed"))));
+        return Either::Left(ready(res.clone().map_err(TlsKeyError::Failed)));
       }
     };
     drop(cache);
@@ -204,7 +227,7 @@ impl TlsKeyResolver {
           // Someone beat us to it
         }
       }
-      res.map_err(|_| anyhow!("Failed"))
+      res.map_err(TlsKeyError::Failed)
     });
     Either::Right(async move { handle.await? })
   }
@@ -222,6 +245,12 @@ pub struct TlsKeyLookup {
     RefCell<HashMap<String, broadcast::Sender<Result<TlsKey, ErrorType>>>>,
 }
 
+impl deno_core::GarbageCollected for TlsKeyLookup {
+  fn get_name(&self) -> &'static std::ffi::CStr {
+    c"TlsKeyLookup"
+  }
+}
+
 impl TlsKeyLookup {
   /// Multiple `poll` calls are safe, but this method is not starvation-safe. Generally
   /// only one `poll`er should be active at any time.
@@ -237,28 +266,33 @@ impl TlsKeyLookup {
   }
 
   /// Resolve a previously polled item.
-  pub fn resolve(&self, sni: String, res: Result<TlsKey, AnyError>) {
+  pub fn resolve(&self, sni: String, res: Result<TlsKey, String>) {
     _ = self
       .pending
       .borrow_mut()
       .remove(&sni)
       .unwrap()
-      .send(res.map_err(Rc::new));
+      .send(res.map_err(|e| Arc::new(e.into_boxed_str())));
   }
 }
 
 #[cfg(test)]
 pub mod tests {
-  use super::*;
   use deno_core::unsync::spawn;
-  use rustls::Certificate;
-  use rustls::PrivateKey;
+
+  use super::*;
 
   fn tls_key_for_test(sni: &str) -> TlsKey {
-    TlsKey(
-      vec![Certificate(format!("{sni}-cert").into_bytes())],
-      PrivateKey(format!("{sni}-key").into_bytes()),
-    )
+    let manifest_dir =
+      std::path::PathBuf::from(std::env::var("CARGO_MANIFEST_DIR").unwrap());
+    let sni = sni.replace(".com", "");
+    let cert_file = manifest_dir.join(format!("testdata/{}_cert.der", sni));
+    let prikey_file = manifest_dir.join(format!("testdata/{}_prikey.der", sni));
+    let cert = std::fs::read(cert_file).unwrap();
+    let prikey = std::fs::read(prikey_file).unwrap();
+    let cert = CertificateDer::from(cert);
+    let prikey = PrivateKeyDer::try_from(prikey).unwrap();
+    TlsKey(vec![cert], prikey)
   }
 
   #[tokio::test]
@@ -270,8 +304,8 @@ pub mod tests {
       }
     });
 
-    let key = resolver.resolve("example.com".to_owned()).await.unwrap();
-    assert_eq!(tls_key_for_test("example.com"), key);
+    let key = resolver.resolve("example1.com".to_owned()).await.unwrap();
+    assert_eq!(tls_key_for_test("example1.com"), key);
     drop(resolver);
 
     task.await.unwrap();
@@ -286,13 +320,13 @@ pub mod tests {
       }
     });
 
-    let f1 = resolver.resolve("example.com".to_owned());
-    let f2 = resolver.resolve("example.com".to_owned());
+    let f1 = resolver.resolve("example1.com".to_owned());
+    let f2 = resolver.resolve("example1.com".to_owned());
 
     let key = f1.await.unwrap();
-    assert_eq!(tls_key_for_test("example.com"), key);
+    assert_eq!(tls_key_for_test("example1.com"), key);
     let key = f2.await.unwrap();
-    assert_eq!(tls_key_for_test("example.com"), key);
+    assert_eq!(tls_key_for_test("example1.com"), key);
     drop(resolver);
 
     task.await.unwrap();

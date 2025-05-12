@@ -1,25 +1,64 @@
-// Copyright 2018-2024 the Deno authors. All rights reserved. MIT license.
+// Copyright 2018-2025 the Deno authors. MIT license.
+use std::cell::RefCell;
+use std::io::Read;
+
+use brotli::enc::backward_references::BrotliEncoderMode;
+use brotli::enc::encode::BrotliEncoderCompress;
+use brotli::enc::encode::BrotliEncoderOperation;
 use brotli::enc::encode::BrotliEncoderParameter;
-use brotli::ffi::compressor::*;
-use brotli::ffi::decompressor::ffi::interface::BrotliDecoderResult;
-use brotli::ffi::decompressor::ffi::BrotliDecoderState;
-use brotli::ffi::decompressor::*;
+use brotli::enc::encode::BrotliEncoderStateStruct;
+use brotli::writer::StandardAlloc;
+use brotli::BrotliDecompressStream;
+use brotli::BrotliResult;
+use brotli::BrotliState;
 use brotli::Decompressor;
-use deno_core::error::type_error;
-use deno_core::error::AnyError;
 use deno_core::op2;
 use deno_core::JsBuffer;
 use deno_core::OpState;
 use deno_core::Resource;
 use deno_core::ToJsBuffer;
-use std::io::Read;
 
-fn encoder_mode(mode: u32) -> Result<BrotliEncoderMode, AnyError> {
-  if mode > 6 {
-    return Err(type_error("Invalid encoder mode"));
-  }
-  // SAFETY: mode is a valid discriminant for BrotliEncoderMode
-  unsafe { Ok(std::mem::transmute::<u32, BrotliEncoderMode>(mode)) }
+#[derive(Debug, thiserror::Error, deno_error::JsError)]
+pub enum BrotliError {
+  #[class(type)]
+  #[error("Invalid encoder mode")]
+  InvalidEncoderMode,
+  #[class(type)]
+  #[error("Failed to compress")]
+  CompressFailed,
+  #[class(type)]
+  #[error("Failed to decompress")]
+  DecompressFailed,
+  #[class(inherit)]
+  #[error(transparent)]
+  Join(
+    #[from]
+    #[inherit]
+    tokio::task::JoinError,
+  ),
+  #[class(inherit)]
+  #[error(transparent)]
+  Resource(
+    #[from]
+    #[inherit]
+    deno_core::error::ResourceError,
+  ),
+  #[class(inherit)]
+  #[error("{0}")]
+  Io(#[inherit] std::io::Error),
+}
+
+fn encoder_mode(mode: u32) -> Result<BrotliEncoderMode, BrotliError> {
+  Ok(match mode {
+    0 => BrotliEncoderMode::BROTLI_MODE_GENERIC,
+    1 => BrotliEncoderMode::BROTLI_MODE_TEXT,
+    2 => BrotliEncoderMode::BROTLI_MODE_FONT,
+    3 => BrotliEncoderMode::BROTLI_FORCE_LSB_PRIOR,
+    4 => BrotliEncoderMode::BROTLI_FORCE_MSB_PRIOR,
+    5 => BrotliEncoderMode::BROTLI_FORCE_UTF8_PRIOR,
+    6 => BrotliEncoderMode::BROTLI_FORCE_SIGNED_PRIOR,
+    _ => return Err(BrotliError::InvalidEncoderMode),
+  })
 }
 
 #[op2(fast)]
@@ -30,26 +69,24 @@ pub fn op_brotli_compress(
   #[smi] quality: i32,
   #[smi] lgwin: i32,
   #[smi] mode: u32,
-) -> Result<usize, AnyError> {
-  let in_buffer = buffer.as_ptr();
-  let in_size = buffer.len();
-  let out_buffer = out.as_mut_ptr();
+) -> Result<usize, BrotliError> {
+  let mode = encoder_mode(mode)?;
   let mut out_size = out.len();
 
-  // SAFETY: in_size and in_buffer, out_size and out_buffer are valid for this call.
-  if unsafe {
-    BrotliEncoderCompress(
-      quality,
-      lgwin,
-      encoder_mode(mode)?,
-      in_size,
-      in_buffer,
-      &mut out_size as *mut usize,
-      out_buffer,
-    )
-  } != 1
-  {
-    return Err(type_error("Failed to compress"));
+  let result = BrotliEncoderCompress(
+    StandardAlloc::default(),
+    &mut StandardAlloc::default(),
+    quality,
+    lgwin,
+    mode,
+    buffer.len(),
+    buffer,
+    &mut out_size,
+    out,
+    &mut |_, _, _, _| (),
+  );
+  if result != 1 {
+    return Err(BrotliError::CompressFailed);
   }
 
   Ok(out_size)
@@ -79,30 +116,27 @@ pub async fn op_brotli_compress_async(
   #[smi] quality: i32,
   #[smi] lgwin: i32,
   #[smi] mode: u32,
-) -> Result<ToJsBuffer, AnyError> {
+) -> Result<ToJsBuffer, BrotliError> {
+  let mode = encoder_mode(mode)?;
   tokio::task::spawn_blocking(move || {
-    let in_buffer = input.as_ptr();
-    let in_size = input.len();
-
-    let mut out = vec![0u8; max_compressed_size(in_size)];
-    let out_buffer = out.as_mut_ptr();
+    let input = &*input;
+    let mut out = vec![0u8; max_compressed_size(input.len())];
     let mut out_size = out.len();
 
-    // SAFETY: in_size and in_buffer, out_size and out_buffer
-    // are valid for this call.
-    if unsafe {
-      BrotliEncoderCompress(
-        quality,
-        lgwin,
-        encoder_mode(mode)?,
-        in_size,
-        in_buffer,
-        &mut out_size as *mut usize,
-        out_buffer,
-      )
-    } != 1
-    {
-      return Err(type_error("Failed to compress"));
+    let result = BrotliEncoderCompress(
+      StandardAlloc::default(),
+      &mut StandardAlloc::default(),
+      quality,
+      lgwin,
+      mode,
+      input.len(),
+      input,
+      &mut out_size,
+      &mut out,
+      &mut |_, _, _, _| (),
+    );
+    if result != 1 {
+      return Err(BrotliError::CompressFailed);
     }
 
     out.truncate(out_size);
@@ -112,18 +146,10 @@ pub async fn op_brotli_compress_async(
 }
 
 struct BrotliCompressCtx {
-  inst: *mut BrotliEncoderState,
+  inst: RefCell<BrotliEncoderStateStruct<StandardAlloc>>,
 }
 
 impl Resource for BrotliCompressCtx {}
-
-impl Drop for BrotliCompressCtx {
-  fn drop(&mut self) {
-    // SAFETY: `self.inst` is the current brotli encoder instance.
-    // It is not used after the following call.
-    unsafe { BrotliEncoderDestroyInstance(self.inst) };
-  }
-}
 
 #[op2]
 #[smi]
@@ -131,19 +157,15 @@ pub fn op_create_brotli_compress(
   state: &mut OpState,
   #[serde] params: Vec<(u8, i32)>,
 ) -> u32 {
-  let inst =
-    // SAFETY: Creates a brotli encoder instance for default allocators.
-    unsafe { BrotliEncoderCreateInstance(None, None, std::ptr::null_mut()) };
+  let mut inst = BrotliEncoderStateStruct::new(StandardAlloc::default());
 
   for (key, value) in params {
-    // SAFETY: `key` can range from 0-255.
-    // Any valid u32 can be used for the `value`.
-    unsafe {
-      BrotliEncoderSetParameter(inst, encoder_param(key), value as u32);
-    }
+    inst.set_parameter(encoder_param(key), value as u32);
   }
 
-  state.resource_table.add(BrotliCompressCtx { inst })
+  state.resource_table.add(BrotliCompressCtx {
+    inst: RefCell::new(inst),
+  })
 }
 
 fn encoder_param(param: u8) -> BrotliEncoderParameter {
@@ -158,32 +180,27 @@ pub fn op_brotli_compress_stream(
   #[smi] rid: u32,
   #[buffer] input: &[u8],
   #[buffer] output: &mut [u8],
-) -> Result<usize, AnyError> {
+) -> Result<usize, BrotliError> {
   let ctx = state.resource_table.get::<BrotliCompressCtx>(rid)?;
+  let mut inst = ctx.inst.borrow_mut();
+  let mut output_offset = 0;
 
-  // SAFETY: TODO(littledivy)
-  unsafe {
-    let mut available_in = input.len();
-    let mut next_in = input.as_ptr();
-    let mut available_out = output.len();
-    let mut next_out = output.as_mut_ptr();
-
-    if BrotliEncoderCompressStream(
-      ctx.inst,
-      BrotliEncoderOperation::BROTLI_OPERATION_PROCESS,
-      &mut available_in,
-      &mut next_in,
-      &mut available_out,
-      &mut next_out,
-      std::ptr::null_mut(),
-    ) != 1
-    {
-      return Err(type_error("Failed to compress"));
-    }
-
-    // On progress, next_out is advanced and available_out is reduced.
-    Ok(output.len() - available_out)
+  let result = inst.compress_stream(
+    BrotliEncoderOperation::BROTLI_OPERATION_PROCESS,
+    &mut input.len(),
+    input,
+    &mut 0,
+    &mut output.len(),
+    output,
+    &mut output_offset,
+    &mut None,
+    &mut |_, _, _, _| (),
+  );
+  if !result {
+    return Err(BrotliError::CompressFailed);
   }
+
+  Ok(output_offset)
 }
 
 #[op2(fast)]
@@ -192,34 +209,30 @@ pub fn op_brotli_compress_stream_end(
   state: &mut OpState,
   #[smi] rid: u32,
   #[buffer] output: &mut [u8],
-) -> Result<usize, AnyError> {
+) -> Result<usize, BrotliError> {
   let ctx = state.resource_table.get::<BrotliCompressCtx>(rid)?;
+  let mut inst = ctx.inst.borrow_mut();
+  let mut output_offset = 0;
 
-  // SAFETY: TODO(littledivy)
-  unsafe {
-    let mut available_out = output.len();
-    let mut next_out = output.as_mut_ptr();
-    let mut total_out = 0;
-
-    if BrotliEncoderCompressStream(
-      ctx.inst,
-      BrotliEncoderOperation::BROTLI_OPERATION_FINISH,
-      &mut 0,
-      std::ptr::null_mut(),
-      &mut available_out,
-      &mut next_out,
-      &mut total_out,
-    ) != 1
-    {
-      return Err(type_error("Failed to compress"));
-    }
-
-    // On finish, next_out is advanced and available_out is reduced.
-    Ok(output.len() - available_out)
+  let result = inst.compress_stream(
+    BrotliEncoderOperation::BROTLI_OPERATION_FINISH,
+    &mut 0,
+    &[],
+    &mut 0,
+    &mut output.len(),
+    output,
+    &mut output_offset,
+    &mut None,
+    &mut |_, _, _, _| (),
+  );
+  if !result {
+    return Err(BrotliError::CompressFailed);
   }
+
+  Ok(output_offset)
 }
 
-fn brotli_decompress(buffer: &[u8]) -> Result<ToJsBuffer, AnyError> {
+fn brotli_decompress(buffer: &[u8]) -> Result<ToJsBuffer, std::io::Error> {
   let mut output = Vec::with_capacity(4096);
   let mut decompressor = Decompressor::new(buffer, buffer.len());
   decompressor.read_to_end(&mut output)?;
@@ -230,7 +243,7 @@ fn brotli_decompress(buffer: &[u8]) -> Result<ToJsBuffer, AnyError> {
 #[serde]
 pub fn op_brotli_decompress(
   #[buffer] buffer: &[u8],
-) -> Result<ToJsBuffer, AnyError> {
+) -> Result<ToJsBuffer, std::io::Error> {
   brotli_decompress(buffer)
 }
 
@@ -238,30 +251,30 @@ pub fn op_brotli_decompress(
 #[serde]
 pub async fn op_brotli_decompress_async(
   #[buffer] buffer: JsBuffer,
-) -> Result<ToJsBuffer, AnyError> {
-  tokio::task::spawn_blocking(move || brotli_decompress(&buffer)).await?
+) -> Result<ToJsBuffer, BrotliError> {
+  tokio::task::spawn_blocking(move || {
+    brotli_decompress(&buffer).map_err(BrotliError::Io)
+  })
+  .await?
 }
 
 struct BrotliDecompressCtx {
-  inst: *mut BrotliDecoderState,
+  inst: RefCell<BrotliState<StandardAlloc, StandardAlloc, StandardAlloc>>,
 }
 
 impl Resource for BrotliDecompressCtx {}
 
-impl Drop for BrotliDecompressCtx {
-  fn drop(&mut self) {
-    // SAFETY: TODO(littledivy)
-    unsafe { CBrotliDecoderDestroyInstance(self.inst) };
-  }
-}
-
 #[op2(fast)]
 #[smi]
 pub fn op_create_brotli_decompress(state: &mut OpState) -> u32 {
-  let inst =
-    // SAFETY: TODO(littledivy)
-    unsafe { CBrotliDecoderCreateInstance(None, None, std::ptr::null_mut()) };
-  state.resource_table.add(BrotliDecompressCtx { inst })
+  let inst = BrotliState::new(
+    StandardAlloc::default(),
+    StandardAlloc::default(),
+    StandardAlloc::default(),
+  );
+  state.resource_table.add(BrotliDecompressCtx {
+    inst: RefCell::new(inst),
+  })
 }
 
 #[op2(fast)]
@@ -271,34 +284,26 @@ pub fn op_brotli_decompress_stream(
   #[smi] rid: u32,
   #[buffer] input: &[u8],
   #[buffer] output: &mut [u8],
-) -> Result<usize, AnyError> {
+) -> Result<usize, BrotliError> {
   let ctx = state.resource_table.get::<BrotliDecompressCtx>(rid)?;
+  let mut inst = ctx.inst.borrow_mut();
+  let mut output_offset = 0;
 
-  // SAFETY: TODO(littledivy)
-  unsafe {
-    let mut available_in = input.len();
-    let mut next_in = input.as_ptr();
-    let mut available_out = output.len();
-    let mut next_out = output.as_mut_ptr();
-
-    if matches!(
-      CBrotliDecoderDecompressStream(
-        ctx.inst,
-        &mut available_in,
-        &mut next_in,
-        &mut available_out,
-        &mut next_out,
-        std::ptr::null_mut(),
-      ),
-      BrotliDecoderResult::BROTLI_DECODER_RESULT_ERROR
-    ) {
-      let ec = CBrotliDecoderGetErrorCode(ctx.inst) as i32;
-      return Err(type_error(format!("Failed to decompress, error {ec}")));
-    }
-
-    // On progress, next_out is advanced and available_out is reduced.
-    Ok(output.len() - available_out)
+  let result = BrotliDecompressStream(
+    &mut input.len(),
+    &mut 0,
+    input,
+    &mut output.len(),
+    &mut output_offset,
+    output,
+    &mut 0,
+    &mut inst,
+  );
+  if matches!(result, BrotliResult::ResultFailure) {
+    return Err(BrotliError::DecompressFailed);
   }
+
+  Ok(output_offset)
 }
 
 #[op2(fast)]
@@ -307,32 +312,24 @@ pub fn op_brotli_decompress_stream_end(
   state: &mut OpState,
   #[smi] rid: u32,
   #[buffer] output: &mut [u8],
-) -> Result<usize, AnyError> {
+) -> Result<usize, BrotliError> {
   let ctx = state.resource_table.get::<BrotliDecompressCtx>(rid)?;
+  let mut inst = ctx.inst.borrow_mut();
+  let mut output_offset = 0;
 
-  // SAFETY: TODO(littledivy)
-  unsafe {
-    let mut available_out = output.len();
-    let mut next_out = output.as_mut_ptr();
-    let mut available_in = 0;
-    let mut next_in = [];
-    let mut total_out = 0;
-
-    if matches!(
-      CBrotliDecoderDecompressStream(
-        ctx.inst,
-        &mut available_in,
-        next_in.as_mut_ptr(),
-        &mut available_out,
-        &mut next_out,
-        &mut total_out,
-      ),
-      BrotliDecoderResult::BROTLI_DECODER_RESULT_ERROR
-    ) {
-      return Err(type_error("Failed to decompress"));
-    }
-
-    // On finish, next_out is advanced and available_out is reduced.
-    Ok(output.len() - available_out)
+  let result = BrotliDecompressStream(
+    &mut 0,
+    &mut 0,
+    &[],
+    &mut output.len(),
+    &mut output_offset,
+    output,
+    &mut 0,
+    &mut inst,
+  );
+  if matches!(result, BrotliResult::ResultFailure) {
+    return Err(BrotliError::DecompressFailed);
   }
+
+  Ok(output_offset)
 }

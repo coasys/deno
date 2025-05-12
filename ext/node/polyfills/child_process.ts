@@ -1,4 +1,4 @@
-// Copyright 2018-2024 the Deno authors. All rights reserved. MIT license.
+// Copyright 2018-2025 the Deno authors. MIT license.
 
 // This module implements 'child_process' module of Node.JS API.
 // ref: https://nodejs.org/api/child_process.html
@@ -6,11 +6,10 @@
 // TODO(petamoriken): enable prefer-primordials for node polyfills
 // deno-lint-ignore-file prefer-primordials
 
-import { internals } from "ext:core/mod.js";
+import { internals, primordials } from "ext:core/mod.js";
 import {
   op_bootstrap_unstable_args,
   op_node_child_ipc_pipe,
-  op_npm_process_state,
 } from "ext:core/ops";
 
 import {
@@ -38,22 +37,24 @@ import {
   ERR_OUT_OF_RANGE,
   genericNodeError,
 } from "ext:deno_node/internal/errors.ts";
-import {
-  ArrayIsArray,
-  ArrayPrototypeJoin,
-  ArrayPrototypePush,
-  ArrayPrototypeSlice,
-  ObjectAssign,
-  StringPrototypeSlice,
-} from "ext:deno_node/internal/primordials.mjs";
 import { getSystemErrorName, promisify } from "node:util";
-import { createDeferredPromise } from "ext:deno_node/internal/util.mjs";
 import process from "node:process";
 import { Buffer } from "node:buffer";
 import {
   convertToValidSignal,
   kEmptyObject,
 } from "ext:deno_node/internal/util.mjs";
+import { kNeedsNpmProcessState } from "ext:deno_process/40_process.js";
+
+const {
+  ArrayIsArray,
+  ArrayPrototypeJoin,
+  ArrayPrototypePush,
+  ArrayPrototypeSlice,
+  ObjectAssign,
+  PromiseWithResolvers,
+  StringPrototypeSlice,
+} = primordials;
 
 const MAX_BUFFER = 1024 * 1024;
 
@@ -115,7 +116,8 @@ export function fork(
   // more
   const v8Flags: string[] = [];
   if (Array.isArray(execArgv)) {
-    for (let index = 0; index < execArgv.length; index++) {
+    let index = 0;
+    while (index < execArgv.length) {
       const flag = execArgv[index];
       if (flag.startsWith("--max-old-space-size")) {
         execArgv.splice(index, 1);
@@ -123,6 +125,18 @@ export function fork(
       } else if (flag.startsWith("--enable-source-maps")) {
         // https://github.com/denoland/deno/issues/21750
         execArgv.splice(index, 1);
+      } else if (flag.startsWith("-C") || flag.startsWith("--conditions")) {
+        let rm = 1;
+        if (flag.indexOf("=") === -1) {
+          // --conditions foo
+          // so remove the next argument as well.
+          rm = 2;
+        }
+        execArgv.splice(index, rm);
+      } else if (flag.startsWith("--no-warnings")) {
+        execArgv[index] = "--quiet";
+      } else {
+        index++;
       }
     }
   }
@@ -134,7 +148,6 @@ export function fork(
   args = [
     "run",
     ...op_bootstrap_unstable_args(),
-    "--node-modules-dir",
     "-A",
     ...stringifiedV8Flags,
     ...execArgv,
@@ -158,9 +171,8 @@ export function fork(
   options.execPath = options.execPath || Deno.execPath();
   options.shell = false;
 
-  Object.assign(options.env ??= {}, {
-    DENO_DONT_USE_INTERNAL_NODE_COMPAT_STATE: op_npm_process_state(),
-  });
+  // deno-lint-ignore no-explicit-any
+  (options as any)[kNeedsNpmProcessState] = true;
 
   return spawn(options.execPath, args, options);
 }
@@ -334,11 +346,7 @@ type ExecExceptionForPromisify = ExecException & ExecOutputForPromisify;
 
 const customPromiseExecFunction = (orig: typeof exec) => {
   return (...args: [command: string, options: ExecOptions]) => {
-    const { promise, resolve, reject } = createDeferredPromise() as unknown as {
-      promise: PromiseWithChild<ExecOutputForPromisify>;
-      resolve?: (value: ExecOutputForPromisify) => void;
-      reject?: (reason?: ExecExceptionForPromisify) => void;
-    };
+    const { promise, resolve, reject } = PromiseWithResolvers();
 
     promise.child = orig(...args, (err, stdout, stderr) => {
       if (err !== null) {
@@ -670,11 +678,7 @@ const customPromiseExecFileFunction = (
       options?: ExecFileOptions,
     ]
   ) => {
-    const { promise, resolve, reject } = createDeferredPromise() as unknown as {
-      promise: PromiseWithChild<ExecOutputForPromisify>;
-      resolve?: (value: ExecOutputForPromisify) => void;
-      reject?: (reason?: ExecFileExceptionForPromisify) => void;
-    };
+    const { promise, resolve, reject } = PromiseWithResolvers();
 
     promise.child = orig(...args, (err, stdout, stderr) => {
       if (err !== null) {
@@ -825,7 +829,17 @@ export function execFileSync(
 function setupChildProcessIpcChannel() {
   const fd = op_node_child_ipc_pipe();
   if (typeof fd != "number" || fd < 0) return;
-  setupChannel(process, fd);
+  const control = setupChannel(process, fd);
+  process.on("newListener", (name: string) => {
+    if (name === "message" || name === "disconnect") {
+      control.refCounted();
+    }
+  });
+  process.on("removeListener", (name: string) => {
+    if (name === "message" || name === "disconnect") {
+      control.unrefCounted();
+    }
+  });
 }
 
 internals.__setupChildProcessIpcChannel = setupChildProcessIpcChannel;

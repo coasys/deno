@@ -1,6 +1,6 @@
-// Copyright 2018-2024 the Deno authors. All rights reserved. MIT license.
-import * as path from "@std/path/mod.ts";
-import { assert } from "@std/assert/mod.ts";
+// Copyright 2018-2025 the Deno authors. MIT license.
+import * as path from "@std/path";
+import { assert } from "@std/assert";
 import { assertCallbackErrorUncaught } from "../_test_utils.ts";
 import { existsSync, mkdir, mkdirSync } from "node:fs";
 
@@ -25,6 +25,23 @@ Deno.test({
   fn: () => {
     mkdirSync(tmpDir);
     assert(existsSync(tmpDir));
+    Deno.removeSync(tmpDir);
+  },
+});
+
+Deno.test({
+  name: "[node/fs] mkdir mode",
+  fn: () => {
+    mkdirSync(tmpDir, { mode: 0o777 });
+    assert(existsSync(tmpDir));
+    assert(Deno.statSync(tmpDir).mode! & 0o777);
+
+    Deno.removeSync(tmpDir);
+
+    mkdirSync(tmpDir, { mode: "0777" });
+    assert(existsSync(tmpDir));
+    assert(Deno.statSync(tmpDir).mode! & 0o777);
+
     Deno.removeSync(tmpDir);
   },
 });

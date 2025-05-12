@@ -1,11 +1,11 @@
 Check file:///[WILDLINE]/mod.ts
 Checking for slow types in the public API...
-Check file:///[WILDLINE]/mod.ts
 error[banned-triple-slash-directives]: triple slash directives that modify globals are not allowed
  --> [WILDLINE]mod.ts:1:1
   | 
 1 | /// <reference lib="deno.ns" />
   | ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ the triple slash directive
+  | 
   = hint: remove the triple slash directive
 
   info: instead instruct the user of your package to specify these directives
@@ -17,6 +17,7 @@ error[banned-triple-slash-directives]: triple slash directives that modify globa
   | 
 2 | /// <reference no-default-lib="true" />
   | ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ the triple slash directive
+  | 
   = hint: remove the triple slash directive
 
   info: instead instruct the user of your package to specify these directives

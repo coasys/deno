@@ -1,14 +1,8 @@
-// Copyright 2018-2024 the Deno authors. All rights reserved. MIT license.
-import {
-  createHash,
-  createHmac,
-  getHashes,
-  randomFillSync,
-  randomUUID,
-} from "node:crypto";
+// Copyright 2018-2025 the Deno authors. MIT license.
+import { createHash, createHmac, getHashes, hash } from "node:crypto";
 import { Buffer } from "node:buffer";
 import { Readable } from "node:stream";
-import { assert, assertEquals } from "@std/assert/mod.ts";
+import { assert, assertEquals } from "@std/assert";
 
 // https://github.com/denoland/deno/issues/18140
 Deno.test({
@@ -123,17 +117,28 @@ Deno.test("[node/crypto.getHashes]", () => {
   }
 });
 
-Deno.test("[node/crypto.getRandomUUID] works the same way as Web Crypto API", () => {
-  assertEquals(randomUUID().length, crypto.randomUUID().length);
-  assertEquals(typeof randomUUID(), typeof crypto.randomUUID());
+Deno.test("[node/crypto.hash] supports buffer args", () => {
+  const buffer = Buffer.from("abc");
+  const d = createHash("sha1").update(buffer).digest("hex");
+  assertEquals(d, "a9993e364706816aba3e25717850c26c9cd0d89d");
 });
 
-Deno.test("[node/crypto.randomFillSync] supported arguments", () => {
-  const buf = new Uint8Array(10);
+Deno.test("[node/crypto.hash] does not leak", () => {
+  const hasher = createHash("sha1");
+  hasher.update("abc");
+});
 
-  assert(randomFillSync(buf));
-  assert(randomFillSync(buf, 0));
-  // @ts-ignore: arraybuffer arguments are valid.
-  assert(randomFillSync(buf.buffer));
-  assert(randomFillSync(new DataView(buf.buffer)));
+Deno.test("[node/crypto.hash] oneshot hash API", () => {
+  const d = hash("sha1", "Node.js");
+  assertEquals(d, "10b3493287f831e81a438811a1ffba01f8cec4b7");
+});
+
+Deno.test("[node/crypto.hash] shake-128 alias", () => {
+  const d = hash("shake-128", "Node.js", "base64url");
+  assertEquals(d, "Nkx9-EgHpFkeXY5OPsL0rg");
+});
+
+Deno.test("[node/crypto.hash] shake-256 alias", () => {
+  const d = hash("shake-256", "Node.js", "base64url");
+  assertEquals(d, "JdelDxiwp92tkk9jYjEFPMlHD0gC8bMbYtHRCIM6TTQ");
 });

@@ -1,98 +1,29 @@
-// Copyright 2018-2024 the Deno authors. All rights reserved. MIT license.
+// Copyright 2018-2025 the Deno authors. MIT license.
 
-use std::collections::HashSet;
-use std::env::current_dir;
-use std::fs::FileType;
-use std::fs::OpenOptions;
 use std::io::Error;
 use std::io::ErrorKind;
-use std::io::Write;
 use std::path::Path;
 use std::path::PathBuf;
 use std::sync::Arc;
 use std::time::Duration;
-use walkdir::WalkDir;
 
+use deno_config::glob::FileCollector;
 use deno_config::glob::FilePatterns;
 use deno_config::glob::PathOrPattern;
 use deno_config::glob::PathOrPatternSet;
+use deno_config::glob::WalkEntry;
 use deno_core::anyhow::anyhow;
-use deno_core::anyhow::Context;
 use deno_core::error::AnyError;
-pub use deno_core::normalize_path;
 use deno_core::unsync::spawn_blocking;
 use deno_core::ModuleSpecifier;
-use deno_runtime::deno_fs::FileSystem;
-use deno_runtime::deno_node::PathClean;
+use sys_traits::FsCreateDirAll;
+use sys_traits::FsDirEntry;
+use sys_traits::FsSymlinkDir;
 
-use crate::util::gitignore::DirGitIgnores;
-use crate::util::gitignore::GitIgnoreTree;
-use crate::util::path::get_atomic_file_path;
+use crate::sys::CliSys;
 use crate::util::progress_bar::ProgressBar;
 use crate::util::progress_bar::ProgressBarStyle;
 use crate::util::progress_bar::ProgressMessagePrompt;
-
-/// Writes the file to the file system at a temporary path, then
-/// renames it to the destination in a single sys call in order
-/// to never leave the file system in a corrupted state.
-///
-/// This also handles creating the directory if a NotFound error
-/// occurs.
-pub fn atomic_write_file<T: AsRef<[u8]>>(
-  file_path: &Path,
-  data: T,
-  mode: u32,
-) -> std::io::Result<()> {
-  fn atomic_write_file_raw(
-    temp_file_path: &Path,
-    file_path: &Path,
-    data: &[u8],
-    mode: u32,
-  ) -> std::io::Result<()> {
-    write_file(temp_file_path, data, mode)?;
-    std::fs::rename(temp_file_path, file_path)?;
-    Ok(())
-  }
-
-  fn inner(file_path: &Path, data: &[u8], mode: u32) -> std::io::Result<()> {
-    let temp_file_path = get_atomic_file_path(file_path);
-
-    if let Err(write_err) =
-      atomic_write_file_raw(&temp_file_path, file_path, data, mode)
-    {
-      if write_err.kind() == ErrorKind::NotFound {
-        let parent_dir_path = file_path.parent().unwrap();
-        match std::fs::create_dir_all(parent_dir_path) {
-          Ok(()) => {
-            return atomic_write_file_raw(
-              &temp_file_path,
-              file_path,
-              data,
-              mode,
-            )
-            .map_err(|err| add_file_context_to_err(file_path, err));
-          }
-          Err(create_err) => {
-            if !parent_dir_path.exists() {
-              return Err(Error::new(
-                create_err.kind(),
-                format!(
-                  "{:#} (for '{}')\nCheck the permission of the directory.",
-                  create_err,
-                  parent_dir_path.display()
-                ),
-              ));
-            }
-          }
-        }
-      }
-      return Err(add_file_context_to_err(file_path, write_err));
-    }
-    Ok(())
-  }
-
-  inner(file_path, data.as_ref(), mode)
-}
 
 /// Creates a std::fs::File handling if the parent does not exist.
 pub fn create_file(file_path: &Path) -> std::io::Result<std::fs::File> {
@@ -132,48 +63,9 @@ fn add_file_context_to_err(file_path: &Path, err: Error) -> Error {
   )
 }
 
-pub fn write_file<T: AsRef<[u8]>>(
-  filename: &Path,
-  data: T,
-  mode: u32,
-) -> std::io::Result<()> {
-  write_file_2(filename, data, true, mode, true, false)
-}
-
-pub fn write_file_2<T: AsRef<[u8]>>(
-  filename: &Path,
-  data: T,
-  update_mode: bool,
-  mode: u32,
-  is_create: bool,
-  is_append: bool,
-) -> std::io::Result<()> {
-  let mut file = OpenOptions::new()
-    .read(false)
-    .write(true)
-    .append(is_append)
-    .truncate(!is_append)
-    .create(is_create)
-    .open(filename)?;
-
-  if update_mode {
-    #[cfg(unix)]
-    {
-      use std::os::unix::fs::PermissionsExt;
-      let mode = mode & 0o777;
-      let permissions = PermissionsExt::from_mode(mode);
-      file.set_permissions(permissions)?;
-    }
-    #[cfg(not(unix))]
-    let _ = mode;
-  }
-
-  file.write_all(data.as_ref())
-}
-
 /// Similar to `std::fs::canonicalize()` but strips UNC prefixes on Windows.
 pub fn canonicalize_path(path: &Path) -> Result<PathBuf, Error> {
-  Ok(deno_core::strip_unc_prefix(path.canonicalize()?))
+  Ok(deno_path_util::strip_unc_prefix(path.canonicalize()?))
 }
 
 /// Canonicalizes a path which might be non-existent by going up the
@@ -185,244 +77,10 @@ pub fn canonicalize_path(path: &Path) -> Result<PathBuf, Error> {
 pub fn canonicalize_path_maybe_not_exists(
   path: &Path,
 ) -> Result<PathBuf, Error> {
-  canonicalize_path_maybe_not_exists_with_custom_fn(path, canonicalize_path)
-}
-
-pub fn canonicalize_path_maybe_not_exists_with_fs(
-  path: &Path,
-  fs: &dyn FileSystem,
-) -> Result<PathBuf, Error> {
-  canonicalize_path_maybe_not_exists_with_custom_fn(path, |path| {
-    fs.realpath_sync(path).map_err(|err| err.into_io_error())
-  })
-}
-
-fn canonicalize_path_maybe_not_exists_with_custom_fn(
-  path: &Path,
-  canonicalize: impl Fn(&Path) -> Result<PathBuf, Error>,
-) -> Result<PathBuf, Error> {
-  let path = path.to_path_buf().clean();
-  let mut path = path.as_path();
-  let mut names_stack = Vec::new();
-  loop {
-    match canonicalize(path) {
-      Ok(mut canonicalized_path) => {
-        for name in names_stack.into_iter().rev() {
-          canonicalized_path = canonicalized_path.join(name);
-        }
-        return Ok(canonicalized_path);
-      }
-      Err(err) if err.kind() == ErrorKind::NotFound => {
-        names_stack.push(match path.file_name() {
-          Some(name) => name.to_owned(),
-          None => return Err(err),
-        });
-        path = match path.parent() {
-          Some(parent) => parent,
-          None => return Err(err),
-        };
-      }
-      Err(err) => return Err(err),
-    }
-  }
-}
-
-pub fn resolve_from_cwd(path: &Path) -> Result<PathBuf, AnyError> {
-  let resolved_path = if path.is_absolute() {
-    path.to_owned()
-  } else {
-    let cwd =
-      current_dir().context("Failed to get current working directory")?;
-    cwd.join(path)
-  };
-
-  Ok(normalize_path(resolved_path))
-}
-
-#[derive(Debug, Clone)]
-pub struct WalkEntry<'a> {
-  pub path: &'a Path,
-  pub file_type: &'a FileType,
-  pub patterns: &'a FilePatterns,
-}
-
-/// Collects file paths that satisfy the given predicate, by recursively walking `files`.
-/// If the walker visits a path that is listed in `ignore`, it skips descending into the directory.
-pub struct FileCollector<TFilter: Fn(WalkEntry) -> bool> {
-  file_filter: TFilter,
-  ignore_git_folder: bool,
-  ignore_node_modules: bool,
-  vendor_folder: Option<PathBuf>,
-  use_gitignore: bool,
-}
-
-impl<TFilter: Fn(WalkEntry) -> bool> FileCollector<TFilter> {
-  pub fn new(file_filter: TFilter) -> Self {
-    Self {
-      file_filter,
-      ignore_git_folder: false,
-      ignore_node_modules: false,
-      vendor_folder: None,
-      use_gitignore: false,
-    }
-  }
-
-  pub fn ignore_node_modules(mut self) -> Self {
-    self.ignore_node_modules = true;
-    self
-  }
-
-  pub fn set_vendor_folder(mut self, vendor_folder: Option<PathBuf>) -> Self {
-    self.vendor_folder = vendor_folder;
-    self
-  }
-
-  pub fn ignore_git_folder(mut self) -> Self {
-    self.ignore_git_folder = true;
-    self
-  }
-
-  pub fn use_gitignore(mut self) -> Self {
-    self.use_gitignore = true;
-    self
-  }
-
-  pub fn collect_file_patterns(
-    &self,
-    file_patterns: FilePatterns,
-  ) -> Result<Vec<PathBuf>, AnyError> {
-    fn is_pattern_matched(
-      maybe_git_ignore: Option<&DirGitIgnores>,
-      path: &Path,
-      is_dir: bool,
-      file_patterns: &FilePatterns,
-    ) -> bool {
-      use deno_config::glob::FilePatternsMatch;
-
-      let path_kind = match is_dir {
-        true => deno_config::glob::PathKind::Directory,
-        false => deno_config::glob::PathKind::File,
-      };
-      match file_patterns.matches_path_detail(path, path_kind) {
-        FilePatternsMatch::Passed => {
-          // check gitignore
-          let is_gitignored = maybe_git_ignore
-            .as_ref()
-            .map(|git_ignore| git_ignore.is_ignored(path, is_dir))
-            .unwrap_or(false);
-          !is_gitignored
-        }
-        FilePatternsMatch::PassedOptedOutExclude => true,
-        FilePatternsMatch::Excluded => false,
-      }
-    }
-
-    let mut maybe_git_ignores = if self.use_gitignore {
-      // Override explicitly specified include paths in the
-      // .gitignore file. This does not apply to globs because
-      // that is way too complicated to reason about.
-      let include_paths = file_patterns
-        .include
-        .as_ref()
-        .map(|include| {
-          include
-            .inner()
-            .iter()
-            .filter_map(|path_or_pattern| {
-              if let PathOrPattern::Path(p) = path_or_pattern {
-                Some(p.clone())
-              } else {
-                None
-              }
-            })
-            .collect::<Vec<_>>()
-        })
-        .unwrap_or_default();
-      Some(GitIgnoreTree::new(
-        Arc::new(deno_runtime::deno_fs::RealFs),
-        include_paths,
-      ))
-    } else {
-      None
-    };
-    let mut target_files = Vec::new();
-    let mut visited_paths = HashSet::new();
-    let file_patterns_by_base = file_patterns.split_by_base();
-    for file_patterns in file_patterns_by_base {
-      let file = normalize_path(&file_patterns.base);
-      // use an iterator in order to minimize the number of file system operations
-      let mut iterator = WalkDir::new(&file)
-        .follow_links(false) // the default, but be explicit
-        .into_iter();
-      loop {
-        let e = match iterator.next() {
-          None => break,
-          Some(Err(_)) => continue,
-          Some(Ok(entry)) => entry,
-        };
-        let file_type = e.file_type();
-        let is_dir = file_type.is_dir();
-        let path = e.path().to_path_buf();
-        let maybe_gitignore =
-          maybe_git_ignores.as_mut().and_then(|git_ignores| {
-            if is_dir {
-              git_ignores.get_resolved_git_ignore_for_dir(&path)
-            } else {
-              git_ignores.get_resolved_git_ignore_for_file(&path)
-            }
-          });
-        if !is_pattern_matched(
-          maybe_gitignore.as_deref(),
-          &path,
-          is_dir,
-          &file_patterns,
-        ) {
-          if is_dir {
-            iterator.skip_current_dir();
-          }
-        } else if is_dir {
-          // allow the user to opt out of ignoring by explicitly specifying the dir
-          let opt_out_ignore = file == path;
-          let should_ignore_dir = !opt_out_ignore && self.is_ignored_dir(&path);
-          if should_ignore_dir || !visited_paths.insert(path.clone()) {
-            iterator.skip_current_dir();
-          }
-        } else if (self.file_filter)(WalkEntry {
-          path: &path,
-          file_type: &file_type,
-          patterns: &file_patterns,
-        }) && visited_paths.insert(path.clone())
-        {
-          target_files.push(path);
-        }
-      }
-    }
-    Ok(target_files)
-  }
-
-  fn is_ignored_dir(&self, path: &Path) -> bool {
-    path
-      .file_name()
-      .map(|dir_name| {
-        let dir_name = dir_name.to_string_lossy().to_lowercase();
-        let is_ignored_file = match dir_name.as_str() {
-          "node_modules" => self.ignore_node_modules,
-          ".git" => self.ignore_git_folder,
-          _ => false,
-        };
-        is_ignored_file
-      })
-      .unwrap_or(false)
-      || self.is_vendor_folder(path)
-  }
-
-  fn is_vendor_folder(&self, path: &Path) -> bool {
-    self
-      .vendor_folder
-      .as_ref()
-      .map(|vendor_folder| path == *vendor_folder)
-      .unwrap_or(false)
-  }
+  deno_path_util::fs::canonicalize_path_maybe_not_exists(
+    &CliSys::default(),
+    path,
+  )
 }
 
 /// Collects module specifiers that satisfy the given predicate as a file path, by recursively walking `include`.
@@ -470,7 +128,7 @@ pub fn collect_specifiers(
     .ignore_git_folder()
     .ignore_node_modules()
     .set_vendor_folder(vendor_folder)
-    .collect_file_patterns(files)?;
+    .collect_file_patterns(&CliSys::default(), files);
   let mut collected_files_as_urls = collected_files
     .iter()
     .map(|f| specifier_from_file_path(f).unwrap())
@@ -492,111 +150,123 @@ pub async fn remove_dir_all_if_exists(path: &Path) -> std::io::Result<()> {
   }
 }
 
-mod clone_dir_imp {
-
-  #[cfg(target_vendor = "apple")]
-  mod apple {
-    use super::super::copy_dir_recursive;
-    use deno_core::error::AnyError;
-    use std::os::unix::ffi::OsStrExt;
-    use std::path::Path;
-    fn clonefile(from: &Path, to: &Path) -> std::io::Result<()> {
-      let from = std::ffi::CString::new(from.as_os_str().as_bytes())?;
-      let to = std::ffi::CString::new(to.as_os_str().as_bytes())?;
-      // SAFETY: `from` and `to` are valid C strings.
-      let ret = unsafe { libc::clonefile(from.as_ptr(), to.as_ptr(), 0) };
-      if ret != 0 {
-        return Err(std::io::Error::last_os_error());
-      }
-      Ok(())
-    }
-
-    pub fn clone_dir_recursive(from: &Path, to: &Path) -> Result<(), AnyError> {
-      if let Some(parent) = to.parent() {
-        std::fs::create_dir_all(parent)?;
-      }
-      // Try to clone the whole directory
-      if let Err(err) = clonefile(from, to) {
-        if err.kind() != std::io::ErrorKind::AlreadyExists {
-          log::warn!(
-            "Failed to clone dir {:?} to {:?} via clonefile: {}",
-            from,
-            to,
-            err
-          );
-        }
-        // clonefile won't overwrite existing files, so if the dir exists
-        // we need to handle it recursively.
-        copy_dir_recursive(from, to)?;
-      }
-
-      Ok(())
-    }
-  }
-
-  #[cfg(target_vendor = "apple")]
-  pub(super) use apple::clone_dir_recursive;
-
-  #[cfg(not(target_vendor = "apple"))]
-  pub(super) fn clone_dir_recursive(
-    from: &std::path::Path,
-    to: &std::path::Path,
-  ) -> Result<(), deno_core::error::AnyError> {
-    if let Err(e) = super::hard_link_dir_recursive(from, to) {
-      log::debug!("Failed to hard link dir {:?} to {:?}: {}", from, to, e);
-      super::copy_dir_recursive(from, to)?;
-    }
-
-    Ok(())
-  }
-}
-
 /// Clones a directory to another directory. The exact method
 /// is not guaranteed - it may be a hardlink, copy, or other platform-specific
 /// operation.
 ///
 /// Note: Does not handle symlinks.
-pub fn clone_dir_recursive(from: &Path, to: &Path) -> Result<(), AnyError> {
-  clone_dir_imp::clone_dir_recursive(from, to)
+pub fn clone_dir_recursive<
+  TSys: sys_traits::FsCopy
+    + sys_traits::FsCloneFile
+    + sys_traits::FsCloneFile
+    + sys_traits::FsCreateDir
+    + sys_traits::FsHardLink
+    + sys_traits::FsReadDir
+    + sys_traits::FsRemoveFile
+    + sys_traits::ThreadSleep,
+>(
+  sys: &TSys,
+  from: &Path,
+  to: &Path,
+) -> Result<(), CopyDirRecursiveError> {
+  if cfg!(target_vendor = "apple") {
+    if let Some(parent) = to.parent() {
+      sys.fs_create_dir_all(parent)?;
+    }
+    // Try to clone the whole directory
+    if let Err(err) = sys.fs_clone_file(from, to) {
+      if !matches!(
+        err.kind(),
+        std::io::ErrorKind::AlreadyExists | std::io::ErrorKind::Unsupported
+      ) {
+        log::debug!(
+          "Failed to clone dir {:?} to {:?} via clonefile: {}",
+          from,
+          to,
+          err
+        );
+      }
+      // clonefile won't overwrite existing files, so if the dir exists
+      // we need to handle it recursively.
+      copy_dir_recursive(sys, from, to)?;
+    }
+  } else if let Err(e) = deno_npm_cache::hard_link_dir_recursive(sys, from, to)
+  {
+    log::debug!("Failed to hard link dir {:?} to {:?}: {}", from, to, e);
+    copy_dir_recursive(sys, from, to)?;
+  }
+
+  Ok(())
+}
+
+#[derive(Debug, thiserror::Error, deno_error::JsError)]
+pub enum CopyDirRecursiveError {
+  #[class(inherit)]
+  #[error("Creating {path}")]
+  Creating {
+    path: PathBuf,
+    #[source]
+    #[inherit]
+    source: Error,
+  },
+  #[class(inherit)]
+  #[error("Reading {path}")]
+  Reading {
+    path: PathBuf,
+    #[source]
+    #[inherit]
+    source: Error,
+  },
+  #[class(inherit)]
+  #[error("Dir {from} to {to}")]
+  Dir {
+    from: PathBuf,
+    to: PathBuf,
+    #[source]
+    #[inherit]
+    source: Box<Self>,
+  },
+  #[class(inherit)]
+  #[error("Copying {from} to {to}")]
+  Copying {
+    from: PathBuf,
+    to: PathBuf,
+    #[source]
+    #[inherit]
+    source: Error,
+  },
+  #[class(inherit)]
+  #[error(transparent)]
+  Other(#[from] Error),
 }
 
 /// Copies a directory to another directory.
 ///
 /// Note: Does not handle symlinks.
-pub fn copy_dir_recursive(from: &Path, to: &Path) -> Result<(), AnyError> {
-  std::fs::create_dir_all(to)
-    .with_context(|| format!("Creating {}", to.display()))?;
-  let read_dir = std::fs::read_dir(from)
-    .with_context(|| format!("Reading {}", from.display()))?;
-
-  for entry in read_dir {
-    let entry = entry?;
-    let file_type = entry.file_type()?;
-    let new_from = from.join(entry.file_name());
-    let new_to = to.join(entry.file_name());
-
-    if file_type.is_dir() {
-      copy_dir_recursive(&new_from, &new_to).with_context(|| {
-        format!("Dir {} to {}", new_from.display(), new_to.display())
-      })?;
-    } else if file_type.is_file() {
-      std::fs::copy(&new_from, &new_to).with_context(|| {
-        format!("Copying {} to {}", new_from.display(), new_to.display())
-      })?;
+pub fn copy_dir_recursive<
+  TSys: sys_traits::FsCopy
+    + sys_traits::FsCloneFile
+    + sys_traits::FsCreateDir
+    + sys_traits::FsHardLink
+    + sys_traits::FsReadDir,
+>(
+  sys: &TSys,
+  from: &Path,
+  to: &Path,
+) -> Result<(), CopyDirRecursiveError> {
+  sys.fs_create_dir_all(to).map_err(|source| {
+    CopyDirRecursiveError::Creating {
+      path: to.to_path_buf(),
+      source,
     }
-  }
-
-  Ok(())
-}
-
-/// Hardlinks the files in one directory to another directory.
-///
-/// Note: Does not handle symlinks.
-pub fn hard_link_dir_recursive(from: &Path, to: &Path) -> Result<(), AnyError> {
-  std::fs::create_dir_all(to)
-    .with_context(|| format!("Creating {}", to.display()))?;
-  let read_dir = std::fs::read_dir(from)
-    .with_context(|| format!("Reading {}", from.display()))?;
+  })?;
+  let read_dir =
+    sys
+      .fs_read_dir(from)
+      .map_err(|source| CopyDirRecursiveError::Reading {
+        path: from.to_path_buf(),
+        source,
+      })?;
 
   for entry in read_dir {
     let entry = entry?;
@@ -605,72 +275,35 @@ pub fn hard_link_dir_recursive(from: &Path, to: &Path) -> Result<(), AnyError> {
     let new_to = to.join(entry.file_name());
 
     if file_type.is_dir() {
-      hard_link_dir_recursive(&new_from, &new_to).with_context(|| {
-        format!("Dir {} to {}", new_from.display(), new_to.display())
-      })?;
-    } else if file_type.is_file() {
-      // note: chance for race conditions here between attempting to create,
-      // then removing, then attempting to create. There doesn't seem to be
-      // a way to hard link with overwriting in Rust, but maybe there is some
-      // way with platform specific code. The workaround here is to handle
-      // scenarios where something else might create or remove files.
-      if let Err(err) = std::fs::hard_link(&new_from, &new_to) {
-        if err.kind() == ErrorKind::AlreadyExists {
-          if let Err(err) = std::fs::remove_file(&new_to) {
-            if err.kind() == ErrorKind::NotFound {
-              // Assume another process/thread created this hard link to the file we are wanting
-              // to remove then sleep a little bit to let the other process/thread move ahead
-              // faster to reduce contention.
-              std::thread::sleep(Duration::from_millis(10));
-            } else {
-              return Err(err).with_context(|| {
-                format!(
-                  "Removing file to hard link {} to {}",
-                  new_from.display(),
-                  new_to.display()
-                )
-              });
-            }
-          }
-
-          // Always attempt to recreate the hardlink. In contention scenarios, the other process
-          // might have been killed or exited after removing the file, but before creating the hardlink
-          if let Err(err) = std::fs::hard_link(&new_from, &new_to) {
-            // Assume another process/thread created this hard link to the file we are wanting
-            // to now create then sleep a little bit to let the other process/thread move ahead
-            // faster to reduce contention.
-            if err.kind() == ErrorKind::AlreadyExists {
-              std::thread::sleep(Duration::from_millis(10));
-            } else {
-              return Err(err).with_context(|| {
-                format!(
-                  "Hard linking {} to {}",
-                  new_from.display(),
-                  new_to.display()
-                )
-              });
-            }
-          }
-        } else {
-          return Err(err).with_context(|| {
-            format!(
-              "Hard linking {} to {}",
-              new_from.display(),
-              new_to.display()
-            )
-          });
+      copy_dir_recursive(sys, &new_from, &new_to).map_err(|source| {
+        CopyDirRecursiveError::Dir {
+          from: new_from.to_path_buf(),
+          to: new_to.to_path_buf(),
+          source: Box::new(source),
         }
-      }
+      })?;
+    } else if file_type.is_file() {
+      sys.fs_copy(&new_from, &new_to).map_err(|source| {
+        CopyDirRecursiveError::Copying {
+          from: new_from.to_path_buf(),
+          to: new_to.to_path_buf(),
+          source,
+        }
+      })?;
     }
   }
 
   Ok(())
 }
 
-pub fn symlink_dir(oldpath: &Path, newpath: &Path) -> Result<(), AnyError> {
-  let err_mapper = |err: Error| {
+pub fn symlink_dir<TSys: sys_traits::BaseFsSymlinkDir>(
+  sys: &TSys,
+  oldpath: &Path,
+  newpath: &Path,
+) -> Result<(), Error> {
+  let err_mapper = |err: Error, kind: Option<ErrorKind>| {
     Error::new(
-      err.kind(),
+      kind.unwrap_or_else(|| err.kind()),
       format!(
         "{}, symlink '{}' -> '{}'",
         err,
@@ -679,17 +312,18 @@ pub fn symlink_dir(oldpath: &Path, newpath: &Path) -> Result<(), AnyError> {
       ),
     )
   };
-  #[cfg(unix)]
-  {
-    use std::os::unix::fs::symlink;
-    symlink(oldpath, newpath).map_err(err_mapper)?;
-  }
-  #[cfg(not(unix))]
-  {
-    use std::os::windows::fs::symlink_dir;
-    symlink_dir(oldpath, newpath).map_err(err_mapper)?;
-  }
-  Ok(())
+
+  sys.fs_symlink_dir(oldpath, newpath).map_err(|err| {
+    #[cfg(windows)]
+    if let Some(code) = err.raw_os_error() {
+      if code as u32 == winapi::shared::winerror::ERROR_PRIVILEGE_NOT_HELD
+        || code as u32 == winapi::shared::winerror::ERROR_INVALID_FUNCTION
+      {
+        return err_mapper(err, Some(ErrorKind::PermissionDenied));
+      }
+    }
+    err_mapper(err, None)
+  })
 }
 
 /// Gets the total size (in bytes) of a directory.
@@ -714,11 +348,10 @@ struct LaxSingleProcessFsFlagInner {
 
 impl Drop for LaxSingleProcessFsFlagInner {
   fn drop(&mut self) {
-    use fs3::FileExt;
     // kill the poll thread
     self.finished_token.cancel();
     // release the file lock
-    if let Err(err) = self.fs_file.unlock() {
+    if let Err(err) = fs3::FileExt::unlock(&self.fs_file) {
       log::debug!(
         "Failed releasing lock for {}. {:#}",
         self.file_path.display(),
@@ -774,7 +407,7 @@ impl LaxSingleProcessFsFlag {
               //
               // This uses a blocking task because we use a single threaded
               // runtime and this is time sensitive so we don't want it to update
-              // at the whims of of whatever is occurring on the runtime thread.
+              // at the whims of whatever is occurring on the runtime thread.
               spawn_blocking({
                 let token = token.clone();
                 let last_updated_path = last_updated_path.clone();
@@ -871,31 +504,15 @@ pub fn specifier_from_file_path(
 
 #[cfg(test)]
 mod tests {
-  use super::*;
   use deno_core::futures;
   use deno_core::parking_lot::Mutex;
+  use deno_path_util::normalize_path;
   use pretty_assertions::assert_eq;
   use test_util::PathRef;
   use test_util::TempDir;
   use tokio::sync::Notify;
 
-  #[test]
-  fn resolve_from_cwd_child() {
-    let cwd = current_dir().unwrap();
-    assert_eq!(resolve_from_cwd(Path::new("a")).unwrap(), cwd.join("a"));
-  }
-
-  #[test]
-  fn resolve_from_cwd_dot() {
-    let cwd = current_dir().unwrap();
-    assert_eq!(resolve_from_cwd(Path::new(".")).unwrap(), cwd);
-  }
-
-  #[test]
-  fn resolve_from_cwd_parent() {
-    let cwd = current_dir().unwrap();
-    assert_eq!(resolve_from_cwd(Path::new("a/..")).unwrap(), cwd);
-  }
+  use super::*;
 
   #[test]
   fn test_normalize_path() {
@@ -912,158 +529,6 @@ mod tests {
         PathBuf::from("C:\\a\\c")
       );
     }
-  }
-
-  #[test]
-  fn resolve_from_cwd_absolute() {
-    let expected = Path::new("a");
-    let cwd = current_dir().unwrap();
-    let absolute_expected = cwd.join(expected);
-    assert_eq!(resolve_from_cwd(expected).unwrap(), absolute_expected);
-  }
-
-  #[test]
-  fn test_collect_files() {
-    fn create_files(dir_path: &PathRef, files: &[&str]) {
-      dir_path.create_dir_all();
-      for f in files {
-        dir_path.join(f).write("");
-      }
-    }
-
-    // dir.ts
-    // ├── a.ts
-    // ├── b.js
-    // ├── child
-    // |   ├── git
-    // |   |   └── git.js
-    // |   ├── node_modules
-    // |   |   └── node_modules.js
-    // |   ├── vendor
-    // |   |   └── vendor.js
-    // │   ├── e.mjs
-    // │   ├── f.mjsx
-    // │   ├── .foo.TS
-    // │   └── README.md
-    // ├── c.tsx
-    // ├── d.jsx
-    // └── ignore
-    //     ├── g.d.ts
-    //     └── .gitignore
-
-    let t = TempDir::new();
-
-    let root_dir_path = t.path().join("dir.ts");
-    let root_dir_files = ["a.ts", "b.js", "c.tsx", "d.jsx"];
-    create_files(&root_dir_path, &root_dir_files);
-
-    let child_dir_path = root_dir_path.join("child");
-    let child_dir_files = ["e.mjs", "f.mjsx", ".foo.TS", "README.md"];
-    create_files(&child_dir_path, &child_dir_files);
-
-    t.create_dir_all("dir.ts/child/node_modules");
-    t.write("dir.ts/child/node_modules/node_modules.js", "");
-    t.create_dir_all("dir.ts/child/.git");
-    t.write("dir.ts/child/.git/git.js", "");
-    t.create_dir_all("dir.ts/child/vendor");
-    t.write("dir.ts/child/vendor/vendor.js", "");
-
-    let ignore_dir_path = root_dir_path.join("ignore");
-    let ignore_dir_files = ["g.d.ts", ".gitignore"];
-    create_files(&ignore_dir_path, &ignore_dir_files);
-
-    let file_patterns = FilePatterns {
-      base: root_dir_path.to_path_buf(),
-      include: None,
-      exclude: PathOrPatternSet::new(vec![PathOrPattern::Path(
-        ignore_dir_path.to_path_buf(),
-      )]),
-    };
-    let file_collector = FileCollector::new(|e| {
-      // exclude dotfiles
-      e.path
-        .file_name()
-        .and_then(|f| f.to_str())
-        .map(|f| !f.starts_with('.'))
-        .unwrap_or(false)
-    });
-
-    let result = file_collector
-      .collect_file_patterns(file_patterns.clone())
-      .unwrap();
-    let expected = [
-      "README.md",
-      "a.ts",
-      "b.js",
-      "c.tsx",
-      "d.jsx",
-      "e.mjs",
-      "f.mjsx",
-      "git.js",
-      "node_modules.js",
-      "vendor.js",
-    ];
-    let mut file_names = result
-      .into_iter()
-      .map(|r| r.file_name().unwrap().to_string_lossy().to_string())
-      .collect::<Vec<_>>();
-    file_names.sort();
-    assert_eq!(file_names, expected);
-
-    // test ignoring the .git and node_modules folder
-    let file_collector = file_collector
-      .ignore_git_folder()
-      .ignore_node_modules()
-      .set_vendor_folder(Some(child_dir_path.join("vendor").to_path_buf()));
-    let result = file_collector
-      .collect_file_patterns(file_patterns.clone())
-      .unwrap();
-    let expected = [
-      "README.md",
-      "a.ts",
-      "b.js",
-      "c.tsx",
-      "d.jsx",
-      "e.mjs",
-      "f.mjsx",
-    ];
-    let mut file_names = result
-      .into_iter()
-      .map(|r| r.file_name().unwrap().to_string_lossy().to_string())
-      .collect::<Vec<_>>();
-    file_names.sort();
-    assert_eq!(file_names, expected);
-
-    // test opting out of ignoring by specifying the dir
-    let file_patterns = FilePatterns {
-      base: root_dir_path.to_path_buf(),
-      include: Some(PathOrPatternSet::new(vec![
-        PathOrPattern::Path(root_dir_path.to_path_buf()),
-        PathOrPattern::Path(
-          root_dir_path.to_path_buf().join("child/node_modules/"),
-        ),
-      ])),
-      exclude: PathOrPatternSet::new(vec![PathOrPattern::Path(
-        ignore_dir_path.to_path_buf(),
-      )]),
-    };
-    let result = file_collector.collect_file_patterns(file_patterns).unwrap();
-    let expected = [
-      "README.md",
-      "a.ts",
-      "b.js",
-      "c.tsx",
-      "d.jsx",
-      "e.mjs",
-      "f.mjsx",
-      "node_modules.js",
-    ];
-    let mut file_names = result
-      .into_iter()
-      .map(|r| r.file_name().unwrap().to_string_lossy().to_string())
-      .collect::<Vec<_>>();
-    file_names.sort();
-    assert_eq!(file_names, expected);
   }
 
   #[test]

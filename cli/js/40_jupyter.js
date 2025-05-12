@@ -1,4 +1,4 @@
-// Copyright 2018-2024 the Deno authors. All rights reserved. MIT license.
+// Copyright 2018-2025 the Deno authors. MIT license.
 // deno-lint-ignore-file
 
 /*
@@ -177,6 +177,52 @@ function isCanvasLike(obj) {
   return obj !== null && typeof obj === "object" && "toDataURL" in obj;
 }
 
+function isJpg(obj) {
+  // Check if obj is a Uint8Array
+  if (!(obj instanceof Uint8Array)) {
+    return false;
+  }
+
+  // JPG files start with the magic bytes FF D8
+  if (obj.length < 2 || obj[0] !== 0xFF || obj[1] !== 0xD8) {
+    return false;
+  }
+
+  // JPG files end with the magic bytes FF D9
+  if (
+    obj.length < 2 || obj[obj.length - 2] !== 0xFF ||
+    obj[obj.length - 1] !== 0xD9
+  ) {
+    return false;
+  }
+
+  return true;
+}
+
+function isPng(obj) {
+  // Check if obj is a Uint8Array
+  if (!(obj instanceof Uint8Array)) {
+    return false;
+  }
+
+  // PNG files start with a specific 8-byte signature
+  const pngSignature = [137, 80, 78, 71, 13, 10, 26, 10];
+
+  // Check if the array is at least as long as the signature
+  if (obj.length < pngSignature.length) {
+    return false;
+  }
+
+  // Check each byte of the signature
+  for (let i = 0; i < pngSignature.length; i++) {
+    if (obj[i] !== pngSignature[i]) {
+      return false;
+    }
+  }
+
+  return true;
+}
+
 /** Possible HTML and SVG Elements */
 function isSVGElementLike(obj) {
   return obj !== null && typeof obj === "object" && "outerHTML" in obj &&
@@ -233,6 +279,16 @@ async function format(obj) {
   if (isDataFrameLike(obj)) {
     return extractDataFrame(obj);
   }
+  if (isJpg(obj)) {
+    return {
+      "image/jpeg": core.ops.op_base64_encode(obj),
+    };
+  }
+  if (isPng(obj)) {
+    return {
+      "image/png": core.ops.op_base64_encode(obj),
+    };
+  }
   if (isSVGElementLike(obj)) {
     return {
       "image/svg+xml": obj.outerHTML,
@@ -241,6 +297,19 @@ async function format(obj) {
   if (isHTMLElementLike(obj)) {
     return {
       "text/html": obj.outerHTML,
+    };
+  }
+  if (obj instanceof GPUTexture) {
+    return { "image/png": core.ops.op_jupyter_create_png_from_texture(obj) };
+  }
+  if (obj instanceof GPUBuffer) {
+    return {
+      "text/plain": Deno[Deno.internal].inspectArgs([
+        "%o",
+        core.ops.op_jupyter_get_buffer(obj),
+      ], {
+        colors: !Deno.noColor,
+      }),
     };
   }
   return {
@@ -314,6 +383,34 @@ const html = createTaggedTemplateDisplayable("text/html");
  */
 const svg = createTaggedTemplateDisplayable("image/svg+xml");
 
+function image(obj) {
+  if (typeof obj === "string") {
+    try {
+      obj = Deno.readFileSync(obj);
+    } catch {
+      // pass
+    }
+  }
+
+  if (isJpg(obj)) {
+    return makeDisplayable({ "image/jpeg": core.ops.op_base64_encode(obj) });
+  }
+
+  if (isPng(obj)) {
+    return makeDisplayable({ "image/png": core.ops.op_base64_encode(obj) });
+  }
+
+  if (obj instanceof GPUTexture) {
+    return makeDisplayable({
+      "image/png": core.ops.op_jupyter_create_png_from_texture(obj),
+    });
+  }
+
+  throw new TypeError(
+    "Object is not a valid image or a path to an image. `Deno.jupyter.image` supports displaying JPG or PNG images, or GPUTextures.",
+  );
+}
+
 function isMediaBundle(obj) {
   if (obj == null || typeof obj !== "object" || Array.isArray(obj)) {
     return false;
@@ -337,7 +434,14 @@ async function formatInner(obj, raw) {
 internals.jupyter = { formatInner };
 
 function enableJupyter() {
-  const { op_jupyter_broadcast } = core.ops;
+  const { op_jupyter_broadcast, op_jupyter_input } = core.ops;
+
+  function input(
+    prompt,
+    password,
+  ) {
+    return op_jupyter_input(prompt, password);
+  }
 
   async function broadcast(
     msgType,
@@ -366,6 +470,12 @@ function enableJupyter() {
           ename: err.name,
           evalue: err.message,
           traceback: stack.split("\n"),
+        });
+      } else if (err instanceof GPUError) {
+        await broadcast("error", {
+          ename: err.constructor.name,
+          evalue: err.message,
+          traceback: [],
         });
       } else if (typeof err == "string") {
         await broadcast("error", {
@@ -412,6 +522,45 @@ function enableJupyter() {
     return;
   }
 
+  /**
+   * Prompt for user confirmation (in Jupyter Notebook context)
+   * Override confirm and prompt because they depend on a tty
+   * and in the Deno.jupyter environment that doesn't exist.
+   * @param {string} message - The message to display.
+   * @returns {Promise<boolean>} User confirmation.
+   */
+  function confirm(message = "Confirm") {
+    const answer = input(`${message} [y/N] `, false);
+    return answer === "Y" || answer === "y";
+  }
+
+  /**
+   * Prompt for user input (in Jupyter Notebook context)
+   * @param {string} message - The message to display.
+   * @param {string} defaultValue - The value used if none is provided.
+   * @param {object} options Options
+   * @param {boolean} options.password Hide the output characters
+   * @returns {Promise<string>} The user input.
+   */
+  function prompt(
+    message = "Prompt",
+    defaultValue = "",
+    { password = false } = {},
+  ) {
+    if (defaultValue != "") {
+      message += ` [${defaultValue}]`;
+    }
+    const answer = input(`${message}`, password);
+
+    if (answer === "") {
+      return defaultValue;
+    }
+
+    return answer;
+  }
+
+  globalThis.confirm = confirm;
+  globalThis.prompt = prompt;
   globalThis.Deno.jupyter = {
     broadcast,
     display,
@@ -419,6 +568,7 @@ function enableJupyter() {
     md,
     html,
     svg,
+    image,
     $display,
   };
 }

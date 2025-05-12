@@ -1,6 +1,6 @@
-// Copyright 2018-2024 the Deno authors. All rights reserved. MIT license.
+// Copyright 2018-2025 the Deno authors. MIT license.
 import * as fs from "node:fs";
-import { assertRejects, assertThrows } from "@std/assert/mod.ts";
+import { assertRejects, assertThrows } from "@std/assert";
 
 Deno.test(
   "[node/fs.access] Uses the owner permission when the user is the owner",
@@ -28,6 +28,8 @@ Deno.test(
     try {
       await fs.promises.access(file, fs.constants.R_OK);
       await fs.promises.access(file, fs.constants.W_OK);
+      await fs.promises.access(file, fs.constants.X_OK);
+      await fs.promises.access(file, fs.constants.F_OK);
     } finally {
       await Deno.remove(file);
     }
@@ -60,6 +62,8 @@ Deno.test(
     try {
       fs.accessSync(file, fs.constants.R_OK);
       fs.accessSync(file, fs.constants.W_OK);
+      fs.accessSync(file, fs.constants.X_OK);
+      fs.accessSync(file, fs.constants.F_OK);
     } finally {
       Deno.removeSync(file);
     }

@@ -26,6 +26,13 @@ Or just the following, though it might run other tests:
 cargo test test_name
 ```
 
+To run showing the output of every test use `-- --nocapture` (note: this will
+cause tests to run sequentially instead of in parallel):
+
+```
+cargo test test_name -- --nocapture
+```
+
 ## `__test__.json` file
 
 This file describes the test(s) to execute and the steps to execute. A basic
@@ -76,9 +83,7 @@ Or if you want to run several tests at the same time:
 
 ### Top level properties
 
-- `base` - The base config to use for the test. Options:
-  - `jsr` - Uses env vars for jsr.
-  - `npm` - Uses env vars for npm.
+- `repeat` (number) - Number of times to repeat a test.
 - `tempDir` (boolean) - Copy all the non-test files to a temporary directory and
   execute the command in that temporary directory.
   - By default, tests are executed with a current working directory of the test,
@@ -90,7 +95,7 @@ Or if you want to run several tests at the same time:
 When writing a single step, these may be at the top level rather than nested in
 a "steps" array or "tests" object.
 
-- `args` - A string (that will be spilt on whitespace into an args array) or an
+- `args` - A string (that will be split on whitespace into an args array) or an
   array of arguments.
 - `output` - Path to use to assert the output or text (must end with an .out
   extension) _or_ text to pattern match against the output.

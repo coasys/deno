@@ -1,13 +1,18 @@
-// Copyright 2018-2024 the Deno authors. All rights reserved. MIT license.
+// Copyright 2018-2025 the Deno authors. MIT license.
 
-import { assertMatch, assertRejects } from "@std/assert/mod.ts";
-import { Buffer, BufReader, BufWriter } from "@std/io/mod.ts";
+// deno-lint-ignore-file no-console
+
+import { assertIsError, assertMatch, assertRejects } from "@std/assert";
+import { Buffer, type Reader } from "@std/io";
+import { delay } from "@std/async/delay";
 import { TextProtoReader } from "../testdata/run/textproto.ts";
 import {
   assert,
   assertEquals,
   assertStringIncludes,
   assertThrows,
+  BufReader,
+  BufWriter,
   curlRequest,
   curlRequestWithStdErr,
   execCode,
@@ -17,7 +22,7 @@ import {
 } from "./test_util.ts";
 
 // Since these tests may run in parallel, ensure this port is unique to this file
-const servePort = 4502;
+const servePort = 4511;
 
 const {
   upgradeHttpRaw,
@@ -385,7 +390,7 @@ Deno.test(async function httpServerCanResolveHostnames() {
   const ac = new AbortController();
   const { promise, resolve } = Promise.withResolvers<void>();
 
-  const server = Deno.serve({
+  await using server = Deno.serve({
     handler: (_req) => new Response("ok"),
     hostname: "localhost",
     port: servePort,
@@ -408,7 +413,7 @@ Deno.test(async function httpServerRejectsOnAddrInUse() {
   const ac = new AbortController();
   const { promise, resolve } = Promise.withResolvers<void>();
 
-  const server = Deno.serve({
+  await using server = Deno.serve({
     handler: (_req) => new Response("ok"),
     hostname: "localhost",
     port: servePort,
@@ -439,7 +444,7 @@ Deno.test({ permissions: { net: true } }, async function httpServerBasic() {
   const deferred = Promise.withResolvers<void>();
   const listeningDeferred = Promise.withResolvers<Deno.NetAddr>();
 
-  const server = Deno.serve({
+  await using server = Deno.serve({
     handler: async (request, { remoteAddr }) => {
       // FIXME(bartlomieju):
       // make sure that request can be inspected
@@ -481,7 +486,7 @@ Deno.test(
     const deferred = Promise.withResolvers<void>();
     const listeningDeferred = Promise.withResolvers();
     const listener = Deno.listen({ port: servePort });
-    const server = serveHttpOnListener(
+    await using server = serveHttpOnListener(
       listener,
       ac.signal,
       async (
@@ -530,7 +535,7 @@ Deno.test(
       headers: { "connection": "close" },
     });
 
-    const server = serveHttpOnConnection(
+    await using server = serveHttpOnConnection(
       await acceptPromise,
       ac.signal,
       async (
@@ -570,7 +575,7 @@ Deno.test({ permissions: { net: true } }, async function httpServerOnError() {
   const { promise, resolve } = Promise.withResolvers<void>();
   let requestStash: Request | null;
 
-  const server = Deno.serve({
+  await using server = Deno.serve({
     handler: async (request: Request) => {
       requestStash = request;
       await new Promise((r) => setTimeout(r, 100));
@@ -605,7 +610,7 @@ Deno.test(
     // deno-lint-ignore no-unused-vars
     let requestStash: Request | null;
 
-    const server = Deno.serve({
+    await using server = Deno.serve({
       handler: async (request: Request) => {
         requestStash = request;
         await new Promise((r) => setTimeout(r, 100));
@@ -631,12 +636,91 @@ Deno.test(
   },
 );
 
+Deno.test(
+  { permissions: { net: true } },
+  async function httpServerMultipleResponseBodyConsume() {
+    const ac = new AbortController();
+    const { promise, resolve } = Promise.withResolvers<void>();
+    const response = new Response("Hello World");
+    let hadError = false;
+    await using server = Deno.serve({
+      handler: () => {
+        return response;
+      },
+      port: servePort,
+      signal: ac.signal,
+      onListen: onListen(resolve),
+      onError: () => {
+        hadError = true;
+        return new Response("Internal Server Error", { status: 500 });
+      },
+    });
+
+    await promise;
+    assert(!response.bodyUsed);
+
+    const resp = await fetch(`http://127.0.0.1:${servePort}/`, {
+      headers: { "connection": "close" },
+    });
+    assertEquals(resp.status, 200);
+    const text = await resp.text();
+    assertEquals(text, "Hello World");
+    assert(response.bodyUsed);
+
+    const resp2 = await fetch(`http://127.0.0.1:${servePort}/`, {
+      headers: { "connection": "close" },
+    });
+    assertEquals(resp2.status, 500);
+    const text2 = await resp2.text();
+    assertEquals(text2, "Internal Server Error");
+    assert(hadError);
+    assert(response.bodyUsed);
+
+    ac.abort();
+    await server.finished;
+  },
+);
+
+Deno.test(
+  { permissions: { net: true } },
+  async function httpServerReturnErrorResponse() {
+    const ac = new AbortController();
+    const { promise, resolve } = Promise.withResolvers<void>();
+    let hadError = false;
+    await using server = Deno.serve({
+      handler: () => {
+        return Response.error();
+      },
+      port: servePort,
+      signal: ac.signal,
+      onListen: onListen(resolve),
+      onError: () => {
+        hadError = true;
+        return new Response("Internal Server Error", { status: 500 });
+      },
+    });
+
+    await promise;
+
+    const resp = await fetch(`http://127.0.0.1:${servePort}/`, {
+      headers: { "connection": "close" },
+    });
+    assertEquals(resp.status, 500);
+    const text = await resp.text();
+    assertEquals(text, "Internal Server Error");
+    assert(hadError);
+
+    ac.abort();
+    await server.finished;
+  },
+);
+
 Deno.test({ permissions: { net: true } }, async function httpServerOverload1() {
   const ac = new AbortController();
   const deferred = Promise.withResolvers<void>();
   const listeningDeferred = Promise.withResolvers<void>();
 
-  const server = Deno.serve({
+  await using server = Deno.serve({
     port: servePort,
     signal: ac.signal,
     onListen: onListen(listeningDeferred.resolve),
@@ -671,7 +755,7 @@ Deno.test({ permissions: { net: true } }, async function httpServerOverload2() {
   const deferred = Promise.withResolvers<void>();
   const listeningDeferred = Promise.withResolvers<void>();
 
-  const server = Deno.serve({
+  await using server = Deno.serve({
     port: servePort,
     signal: ac.signal,
     onListen: onListen(listeningDeferred.resolve),
@@ -726,7 +810,7 @@ Deno.test(
 Deno.test({ permissions: { net: true } }, async function httpServerPort0() {
   const ac = new AbortController();
 
-  const server = Deno.serve({
+  await using server = Deno.serve({
     handler() {
       return new Response("Hello World");
     },
@@ -740,40 +824,6 @@ Deno.test({ permissions: { net: true } }, async function httpServerPort0() {
   await server.finished;
 });
 
-Deno.test(
-  { permissions: { net: true } },
-  async function httpServerDefaultOnListenCallback() {
-    const ac = new AbortController();
-
-    const consoleLog = console.log;
-    console.log = (msg) => {
-      try {
-        const match = msg.match(/Listening on http:\/\/localhost:(\d+)\//);
-        assert(!!match, `Didn't match ${msg}`);
-        const port = +match[1];
-        assert(port > 0 && port < 65536);
-      } finally {
-        ac.abort();
-      }
-    };
-
-    try {
-      const server = Deno.serve({
-        handler() {
-          return new Response("Hello World");
-        },
-        hostname: "0.0.0.0",
-        port: 0,
-        signal: ac.signal,
-      });
-
-      await server.finished;
-    } finally {
-      console.log = consoleLog;
-    }
-  },
-);
-
 // https://github.com/denoland/deno/issues/15107
 Deno.test(
   { permissions: { net: true } },
@@ -783,7 +833,7 @@ Deno.test(
     const ac = new AbortController();
 
     let headers: Headers;
-    const server = Deno.serve({
+    await using server = Deno.serve({
       handler: async (request) => {
         await request.text();
         headers = request.headers;
@@ -812,17 +862,99 @@ Deno.test(
   },
 );
 
+Deno.test({ permissions: { net: true } }, async function validPortString() {
+  await using server = Deno.serve({
+    handler: (_request) => new Response(),
+    port: "4501" as unknown as number,
+  });
+  assertEquals(server.addr.transport, "tcp");
+  assertEquals(server.addr.port, 4501);
+  await server.shutdown();
+});
+
+Deno.test({ permissions: { net: true } }, function invalidPortFloat() {
+  assertThrows(
+    () =>
+      Deno.serve({
+        handler: (_request) => new Response(),
+        port: 45.1,
+      }),
+    TypeError,
+    `Invalid port: 45.1`,
+  );
+});
+
+Deno.test({ permissions: { net: true } }, function invalidPortNaN() {
+  assertThrows(
+    () =>
+      Deno.serve({
+        handler: (_request) => new Response(),
+        port: NaN,
+      }),
+    TypeError,
+    `Invalid port: NaN`,
+  );
+});
+
+Deno.test({ permissions: { net: true } }, function invalidPortString() {
+  assertThrows(
+    () =>
+      Deno.serve({
+        handler: (_request) => new Response(),
+        port: "some-non-number-string" as unknown as number,
+      }),
+    TypeError,
+    `Invalid port: 'some-non-number-string'`,
+  );
+});
+
+Deno.test({ permissions: { net: true } }, function invalidPortTooSmall() {
+  assertThrows(
+    () =>
+      Deno.serve({
+        handler: (_request) => new Response(),
+        port: -111,
+      }),
+    RangeError,
+    `Invalid port (out of range): -111`,
+  );
+});
+
+Deno.test({ permissions: { net: true } }, function invalidPortTooLarge() {
+  assertThrows(
+    () =>
+      Deno.serve({
+        handler: (_request) => new Response(),
+        port: 100000,
+      }),
+    RangeError,
+    `Invalid port (out of range): 100000`,
+  );
+});
+
+Deno.test({ permissions: { net: true } }, function invalidPortType() {
+  assertThrows(
+    () =>
+      Deno.serve({
+        handler: (_request) => new Response(),
+        port: true as unknown as number,
+      }),
+    TypeError,
+    `Invalid port (expected number): true`,
+  );
+});
+
 function createUrlTest(
   name: string,
   methodAndPath: string,
   host: string | null,
-  expected: string,
+  expected: string | number,
 ) {
   Deno.test(`httpServerUrl${name}`, async () => {
     const listeningDeferred = Promise.withResolvers<number>();
     const urlDeferred = Promise.withResolvers<string>();
     const ac = new AbortController();
-    const server = Deno.serve({
+    await using server = Deno.serve({
       handler: (request: Request) => {
         urlDeferred.resolve(request.url);
         return new Response("");
@@ -846,11 +978,19 @@ function createUrlTest(
     assertEquals(body.length, writeResult);
 
     try {
-      const expectedResult = expected.replace("HOST", "localhost").replace(
-        "PORT",
-        `${port}`,
-      );
-      assertEquals(await urlDeferred.promise, expectedResult);
+      if (typeof expected === "number") {
+        const buf = new Uint8Array(128);
+        const n = await conn.read(buf);
+        assert(n != null);
+        const response = new TextDecoder().decode(buf.subarray(0, n));
+        assert(response.startsWith(`HTTP/1.1 ${expected}`));
+      } else {
+        const expectedResult = expected.replace("HOST", "localhost").replace(
+          "PORT",
+          `${port}`,
+        );
+        assertEquals(await urlDeferred.promise, expectedResult);
+      }
     } finally {
       ac.abort();
       await server.finished;
@@ -897,22 +1037,27 @@ createUrlTest(
   "http://localhost:1234/path",
 );
 
-createUrlTest("WithAsterisk", "OPTIONS *", null, "*");
+createUrlTest("WithAsterisk", "OPTIONS *", null, "http://localhost:PORT/*");
 createUrlTest(
   "WithAuthorityForm",
   "CONNECT deno.land:80",
   null,
-  "deno.land:80",
+  "http://deno.land:80",
 );
 
-// TODO(mmastrac): These should probably be 400 errors
-createUrlTest("WithInvalidAsterisk", "GET *", null, "*");
-createUrlTest("WithInvalidNakedPath", "GET path", null, "path");
+createUrlTest("WithInvalidAsterisk", "GET *", null, 400);
+createUrlTest("WithInvalidNakedPath", "GET path", null, 400);
 createUrlTest(
   "WithInvalidNakedAuthority",
   "GET deno.land:1234",
   null,
-  "deno.land:1234",
+  400,
+);
+createUrlTest(
+  "WithInvalidConnectAuthority",
+  "CONNECT /path",
+  null,
+  400,
 );
 
 Deno.test(
@@ -922,7 +1067,7 @@ Deno.test(
     const ac = new AbortController();
     const listeningDeferred = Promise.withResolvers<void>();
 
-    const server = Deno.serve({
+    await using server = Deno.serve({
       handler: (request) => {
         assertEquals(request.body, null);
         deferred.resolve();
@@ -962,7 +1107,7 @@ Deno.test(
     const ac = new AbortController();
     const listeningDeferred = Promise.withResolvers<void>();
 
-    const server = Deno.serve({
+    await using server = Deno.serve({
       handler: async (request) => {
         await assertRejects(async () => {
           await request.text();
@@ -1026,7 +1171,7 @@ function createStreamTest(count: number, delay: number, action: string) {
   Deno.test(`httpServerStreamCount${count}Delay${delay}${action}`, async () => {
     const ac = new AbortController();
     const { promise, resolve } = Promise.withResolvers<void>();
-    const server = Deno.serve({
+    await using server = Deno.serve({
       handler: (_request) => {
         return new Response(makeStream(count, delay));
       },
@@ -1080,7 +1225,7 @@ Deno.test(
     writer.close();
     const { promise, resolve } = Promise.withResolvers<void>();
     const ac = new AbortController();
-    const server = Deno.serve({
+    await using server = Deno.serve({
       handler: async (request) => {
         const reqBody = await request.text();
         assertEquals("hello world", reqBody);
@@ -1108,7 +1253,7 @@ Deno.test(
 Deno.test({ permissions: { net: true } }, async function httpServerClose() {
   const ac = new AbortController();
   const { promise, resolve } = Promise.withResolvers<void>();
-  const server = Deno.serve({
+  await using server = Deno.serve({
     handler: () => new Response("ok"),
     port: servePort,
     signal: ac.signal,
@@ -1128,7 +1273,7 @@ Deno.test({ permissions: { net: true } }, async function httpServerCloseGet() {
   const listeningDeferred = Promise.withResolvers<void>();
   const requestDeferred = Promise.withResolvers<void>();
   const responseDeferred = Promise.withResolvers<void>();
-  const server = Deno.serve({
+  await using server = Deno.serve({
     handler: async () => {
       requestDeferred.resolve();
       await new Promise((r) => setTimeout(r, 500));
@@ -1154,13 +1299,12 @@ Deno.test({ permissions: { net: true } }, async function httpServerCloseGet() {
   await server.finished;
 });
 
-// FIXME:
 Deno.test(
   { permissions: { net: true } },
   async function httpServerEmptyBlobResponse() {
     const ac = new AbortController();
     const { promise, resolve } = Promise.withResolvers<void>();
-    const server = Deno.serve({
+    await using server = Deno.serve({
       handler: () => new Response(new Blob([])),
       port: servePort,
       signal: ac.signal,
@@ -1185,7 +1329,7 @@ Deno.test(
     const ac = new AbortController();
     const listeningDeferred = Promise.withResolvers<void>();
     const errorDeferred = Promise.withResolvers<void>();
-    const server = Deno.serve({
+    await using server = Deno.serve({
       handler: () => {
         const body = new ReadableStream({
           start(controller) {
@@ -1226,7 +1370,7 @@ Deno.test(
     const ac = new AbortController();
     const { promise, resolve } = Promise.withResolvers<void>();
 
-    const server = Deno.serve({
+    await using server = Deno.serve({
       handler: () => new Response("韓國".repeat(10)),
       port: servePort,
       signal: ac.signal,
@@ -1261,7 +1405,7 @@ Deno.test({ permissions: { net: true } }, async function httpServerWebSocket() {
   const ac = new AbortController();
   const listeningDeferred = Promise.withResolvers<void>();
   const doneDeferred = Promise.withResolvers<void>();
-  const server = Deno.serve({
+  await using server = Deno.serve({
     handler: (request) => {
       const {
         response,
@@ -1306,7 +1450,7 @@ Deno.test(
   async function httpServerWebSocketRaw() {
     const ac = new AbortController();
     const { promise, resolve } = Promise.withResolvers<void>();
-    const server = Deno.serve({
+    await using server = Deno.serve({
       handler: async (request) => {
         const { conn, response } = upgradeHttpRaw(request);
         const buf = new Uint8Array(1024);
@@ -1386,7 +1530,7 @@ Deno.test(
     const ac = new AbortController();
     const done = Promise.withResolvers<void>();
     const listeningDeferred = Promise.withResolvers<void>();
-    const server = Deno.serve({
+    await using server = Deno.serve({
       handler: (request) => {
         const {
           response,
@@ -1397,7 +1541,7 @@ Deno.test(
             Deno.upgradeWebSocket(request);
           },
           Deno.errors.Http,
-          "already upgraded",
+          "Already upgraded",
         );
         socket.onerror = (e) => {
           console.error(e);
@@ -1440,7 +1584,7 @@ Deno.test(
     const ac = new AbortController();
     const done = Promise.withResolvers<void>();
     const listeningDeferred = Promise.withResolvers<void>();
-    const server = Deno.serve({
+    await using server = Deno.serve({
       handler: (request) => {
         const {
           response,
@@ -1478,7 +1622,7 @@ Deno.test(
     const ac = new AbortController();
     const done = Promise.withResolvers<void>();
     const listeningDeferred = Promise.withResolvers<void>();
-    const server = Deno.serve({
+    await using server = Deno.serve({
       handler: (request) => {
         const {
           response,
@@ -1528,7 +1672,7 @@ Deno.test(
     const ac = new AbortController();
 
     let headers: Headers;
-    const server = Deno.serve({
+    await using server = Deno.serve({
       handler: (request) => {
         headers = request.headers;
         deferred.resolve();
@@ -1567,7 +1711,7 @@ Deno.test(
 
     let headers: Headers;
     let text: string;
-    const server = Deno.serve({
+    await using server = Deno.serve({
       handler: async (request) => {
         headers = request.headers;
         text = await request.text();
@@ -1612,7 +1756,7 @@ Deno.test(
     const ac = new AbortController();
     const listeningDeferred = Promise.withResolvers<void>();
 
-    const server = Deno.serve({
+    await using server = Deno.serve({
       handler: () => {
         deferred.resolve();
         return new Response("");
@@ -1663,7 +1807,7 @@ Deno.test(
     const { promise, resolve } = Promise.withResolvers<void>();
     const ac = new AbortController();
 
-    const server = Deno.serve(
+    await using server = Deno.serve(
       { port: servePort, signal: ac.signal },
       (request: Request) => {
         assert(request.body);
@@ -1694,7 +1838,7 @@ Deno.test(
     const { promise, resolve } = Promise.withResolvers<void>();
     const ac = new AbortController();
 
-    const server = Deno.serve(
+    await using server = Deno.serve(
       { port: servePort, signal: ac.signal },
       (request: Request) => {
         assert(request.body);
@@ -1810,7 +1954,7 @@ Deno.test(
       }).pipeThrough(new TextEncoderStream());
     }
 
-    const server = Deno.serve({
+    await using server = Deno.serve({
       handler: () => {
         deferred.resolve();
         return new Response(periodicStream());
@@ -1842,7 +1986,7 @@ Deno.test(
   { permissions: { net: true } },
   async function httpLargeReadableStreamChunk() {
     const ac = new AbortController();
-    const server = Deno.serve({
+    await using server = Deno.serve({
       handler() {
         return new Response(
           new ReadableStream({
@@ -1882,7 +2026,7 @@ Deno.test(
     const listeningDeferred = Promise.withResolvers<void>();
     const deferred = Promise.withResolvers<void>();
     const ac = new AbortController();
-    const server = Deno.serve({
+    await using server = Deno.serve({
       handler: (request) => {
         assertEquals(request.headers.get("X-Header-Test"), "á");
         deferred.resolve();
@@ -1928,7 +2072,7 @@ Deno.test(
     const listeningDeferred = Promise.withResolvers<void>();
     const ac = new AbortController();
 
-    const server = Deno.serve({
+    await using server = Deno.serve({
       handler: async (request) => {
         // FIXME:
         // assertEquals(new URL(request.url).href, `http://127.0.0.1:${servePort}/`);
@@ -1982,7 +2126,7 @@ Deno.test(
     const listeningDeferred = Promise.withResolvers<void>();
     const ac = new AbortController();
 
-    const server = Deno.serve({
+    await using server = Deno.serve({
       handler: async (request) => {
         assertEquals(await request.text(), "");
         assertEquals(request.headers.get("cookie"), "foo=bar; bar=foo");
@@ -2026,7 +2170,7 @@ Deno.test(
 
     const hostname = "localhost";
 
-    const server = Deno.serve({
+    await using server = Deno.serve({
       handler: () => {
         deferred.resolve();
         return new Response("ok");
@@ -2061,7 +2205,7 @@ Deno.test(
     const listeningDeferred = Promise.withResolvers<void>();
     const ac = new AbortController();
 
-    const server = Deno.serve({
+    await using server = Deno.serve({
       handler: (request) => {
         assertEquals(request.body, null);
         deferred.resolve();
@@ -2097,7 +2241,7 @@ Deno.test(
     const listeningDeferred = Promise.withResolvers<void>();
     const ac = new AbortController();
 
-    const server = Deno.serve({
+    await using server = Deno.serve({
       handler: (request) => {
         assertEquals(request.method, "GET");
         assertEquals(request.headers.get("host"), "deno.land");
@@ -2131,7 +2275,7 @@ Deno.test(
     const listeningDeferred = Promise.withResolvers<void>();
     const ac = new AbortController();
 
-    const server = Deno.serve({
+    await using server = Deno.serve({
       handler: (request) => {
         assertEquals(request.method, "GET");
         assertEquals(request.headers.get("server"), "hello\tworld");
@@ -2165,7 +2309,7 @@ Deno.test(
     const listeningDeferred = Promise.withResolvers<void>();
     const ac = new AbortController();
 
-    const server = Deno.serve({
+    await using server = Deno.serve({
       handler: async (request) => {
         assertEquals(request.method, "GET");
         assertEquals(await request.text(), "");
@@ -2201,7 +2345,7 @@ Deno.test(
     const listeningDeferred = Promise.withResolvers<void>();
     const ac = new AbortController();
 
-    const server = Deno.serve({
+    await using server = Deno.serve({
       handler: async (request) => {
         assertEquals(request.method, "POST");
         assertEquals(await request.text(), "I'm a good request.");
@@ -2248,7 +2392,7 @@ function createServerLengthTest(name: string, testCase: TestCase) {
     const listeningDeferred = Promise.withResolvers<void>();
     const ac = new AbortController();
 
-    const server = Deno.serve({
+    await using server = Deno.serve({
       handler: (request) => {
         assertEquals(request.method, "GET");
         deferred.resolve();
@@ -2380,7 +2524,7 @@ Deno.test(
     const listeningDeferred = Promise.withResolvers<void>();
     const ac = new AbortController();
 
-    const server = Deno.serve({
+    await using server = Deno.serve({
       handler: async (request) => {
         assertEquals(request.method, "POST");
         assertEquals(request.headers.get("content-length"), "5");
@@ -2416,7 +2560,7 @@ Deno.test(
   async function httpServerPostWithInvalidPrefixContentLength() {
     const ac = new AbortController();
     const { promise, resolve } = Promise.withResolvers<void>();
-    const server = Deno.serve({
+    await using server = Deno.serve({
       handler: () => {
         throw new Error("unreachable");
       },
@@ -2456,7 +2600,7 @@ Deno.test(
     const listeningDeferred = Promise.withResolvers<void>();
     const ac = new AbortController();
 
-    const server = Deno.serve({
+    await using server = Deno.serve({
       handler: async (request) => {
         assertEquals(request.method, "POST");
         assertEquals(await request.text(), "qwert");
@@ -2493,7 +2637,7 @@ Deno.test(
     const listeningDeferred = Promise.withResolvers<void>();
     const ac = new AbortController();
 
-    const server = Deno.serve({
+    await using server = Deno.serve({
       handler: async (r) => {
         deferred.resolve();
         assertEquals(await r.text(), "12345");
@@ -2529,7 +2673,7 @@ Deno.test(
     const listeningDeferred = Promise.withResolvers<void>();
     const ac = new AbortController();
 
-    const server = Deno.serve({
+    await using server = Deno.serve({
       handler: () => {
         deferred.resolve();
         return new Response("NaN".repeat(100));
@@ -2672,7 +2816,7 @@ for (const testCase of compressionTestCases) {
         const deferred = Promise.withResolvers<void>();
         const listeningDeferred = Promise.withResolvers<void>();
         const ac = new AbortController();
-        const server = Deno.serve({
+        await using server = Deno.serve({
           handler: async (_request) => {
             const f = await makeTempFile(testCase.length);
             deferred.resolve();
@@ -2728,7 +2872,7 @@ Deno.test(
     const listeningDeferred = Promise.withResolvers<void>();
     const ac = new AbortController();
 
-    const server = Deno.serve({
+    await using server = Deno.serve({
       handler: async (request) => {
         assertEquals(
           await request.bytes(),
@@ -2776,7 +2920,7 @@ for (const delay of ["delay", "nodelay"]) {
         const listeningDeferred = Promise.withResolvers<void>();
         const waitForAbort = Promise.withResolvers<void>();
         const waitForRequest = Promise.withResolvers<void>();
-        const server = Deno.serve({
+        await using server = Deno.serve({
           port: servePort,
           signal: ac.signal,
           onListen: onListen(listeningDeferred.resolve),
@@ -2839,6 +2983,8 @@ for (const delay of ["delay", "nodelay"]) {
   }
 }
 
+// NOTE: This test will start failing when we disable "deno_http/legacy_abort" feature.
+//
 // Test for the internal implementation detail of cached request signals. Ensure that the request's
 // signal is aborted if we try to access it after the request has been completed.
 Deno.test(
@@ -2926,7 +3072,7 @@ Deno.test(
     const { promise, resolve } = Promise.withResolvers<void>();
     const hostname = "127.0.0.1";
 
-    const server = Deno.serve({
+    await using server = Deno.serve({
       handler: () => new Response("Hello World"),
       hostname,
       port: servePort,
@@ -2956,7 +3102,7 @@ Deno.test(
     const { promise, resolve } = Promise.withResolvers<void>();
     const hostname = "127.0.0.1";
 
-    const server = Deno.serve({
+    await using server = Deno.serve({
       handler: () => new Response("Hello World"),
       hostname,
       port: servePort,
@@ -2991,7 +3137,7 @@ Deno.test(
     const listeningDeferred = Promise.withResolvers<void>();
     const deferred = Promise.withResolvers<void>();
 
-    const server = Deno.serve({
+    await using server = Deno.serve({
       handler: async (req) => {
         assertEquals(await req.text(), "");
         deferred.resolve();
@@ -3026,7 +3172,7 @@ Deno.test(
     const ac = new AbortController();
     const { promise, resolve } = Promise.withResolvers<void>();
 
-    const server = Deno.serve({
+    await using server = Deno.serve({
       handler: () => {
         throw new Error("oops");
       },
@@ -3073,7 +3219,7 @@ Deno.test(
   async function httpServer204ResponseDoesntSendContentLength() {
     const { promise, resolve } = Promise.withResolvers<void>();
     const ac = new AbortController();
-    const server = Deno.serve({
+    await using server = Deno.serve({
       handler: (_request) => new Response(null, { status: 204 }),
       port: servePort,
       signal: ac.signal,
@@ -3103,7 +3249,7 @@ Deno.test(
     const ac = new AbortController();
     const listeningDeferred = Promise.withResolvers<void>();
 
-    const server = Deno.serve({
+    await using server = Deno.serve({
       handler: () => {
         deferred.resolve();
         return new Response(null, { status: 304 });
@@ -3148,7 +3294,7 @@ Deno.test(
     const ac = new AbortController();
     const listeningDeferred = Promise.withResolvers<void>();
 
-    const server = Deno.serve({
+    await using server = Deno.serve({
       handler: async (req) => {
         deferred.resolve();
         assertEquals(await req.text(), "hello");
@@ -3209,7 +3355,7 @@ Deno.test(
     const listeningDeferred = Promise.withResolvers<void>();
     const ac = new AbortController();
 
-    const server = Deno.serve({
+    await using server = Deno.serve({
       handler: async (req) => {
         deferred.resolve();
         assertEquals(await req.text(), "");
@@ -3263,7 +3409,7 @@ for (const [name, req] of badRequests) {
       const ac = new AbortController();
       const { promise, resolve } = Promise.withResolvers<void>();
 
-      const server = Deno.serve({
+      await using server = Deno.serve({
         handler: () => {
           throw new Error("oops");
         },
@@ -3310,7 +3456,7 @@ Deno.test(
 
     let reqCount = -1;
     let timerId: number | undefined;
-    const server = Deno.serve({
+    await using server = Deno.serve({
       handler: (_req) => {
         reqCount++;
         if (reqCount === 0) {
@@ -3405,7 +3551,7 @@ Deno.test(
     const ac = new AbortController();
     const { promise, resolve } = Promise.withResolvers<void>();
     let count = 0;
-    const server = Deno.serve({
+    await using server = Deno.serve({
       async onListen({ port }: { port: number }) {
         const res1 = await fetch(`http://localhost:${port}/`);
         assertEquals(await res1.text(), "hello world 1");
@@ -3435,7 +3581,7 @@ Deno.test(
     const ac = new AbortController();
     const { promise, resolve } = Promise.withResolvers<number>();
 
-    const server = Deno.serve({
+    await using server = Deno.serve({
       handler: async (req) => {
         const cloned = req.clone();
         assertEquals(req.headers, cloned.headers);
@@ -3489,7 +3635,7 @@ Deno.test(
     const ac = new AbortController();
     const { promise, resolve } = Promise.withResolvers<number>();
 
-    const server = Deno.serve({
+    await using server = Deno.serve({
       handler: async (req) => {
         await req.text();
 
@@ -3499,7 +3645,7 @@ Deno.test(
         } catch (cloneError) {
           assert(cloneError instanceof TypeError);
           assert(
-            cloneError.message.endsWith("Body is unusable."),
+            cloneError.message.endsWith("Body is unusable"),
           );
 
           ac.abort();
@@ -3522,11 +3668,7 @@ Deno.test(
       fail();
     } catch (clientError) {
       assert(clientError instanceof TypeError);
-      assert(
-        clientError.message.endsWith(
-          "connection closed before message completed",
-        ),
-      );
+      assert(clientError.message.includes("client error"));
     } finally {
       ac.abort();
       await server.finished;
@@ -3542,7 +3684,7 @@ Deno.test({
     const ac = new AbortController();
     const { promise, resolve } = Promise.withResolvers<number>();
 
-    const server = Deno.serve({
+    await using server = Deno.serve({
       handler: async (req) => {
         const _reader = req.body?.getReader();
 
@@ -3552,7 +3694,7 @@ Deno.test({
         } catch (cloneError) {
           assert(cloneError instanceof TypeError);
           assert(
-            cloneError.message.endsWith("Body is unusable."),
+            cloneError.message.endsWith("Body is unusable"),
           );
 
           ac.abort();
@@ -3574,11 +3716,7 @@ Deno.test({
       fail();
     } catch (clientError) {
       assert(clientError instanceof TypeError);
-      assert(
-        clientError.message.endsWith(
-          "connection closed before message completed",
-        ),
-      );
+      assert(clientError.message.includes("client error"));
     } finally {
       ac.abort();
       await server.finished;
@@ -3593,7 +3731,7 @@ Deno.test(
   async function testIssue16567() {
     const ac = new AbortController();
     const { promise, resolve } = Promise.withResolvers<void>();
-    const server = Deno.serve({
+    await using server = Deno.serve({
       async onListen({ port }) {
         const res1 = await fetch(`http://localhost:${port}/`);
         assertEquals((await res1.text()).length, 40 * 50_000);
@@ -3620,7 +3758,7 @@ Deno.test(
   },
 );
 
-function chunkedBodyReader(h: Headers, r: BufReader): Deno.Reader {
+function chunkedBodyReader(h: Headers, r: BufReader): Reader {
   // Based on https://tools.ietf.org/html/rfc2616#section-19.4.6
   const tp = new TextProtoReader(r);
   let finished = false;
@@ -3708,7 +3846,7 @@ async function readTrailers(
   const tp = new TextProtoReader(r);
   const result = await tp.readMimeHeader();
   if (result == null) {
-    throw new Deno.errors.InvalidData("Missing trailer header.");
+    throw new Deno.errors.InvalidData("Missing trailer header");
   }
   const undeclared = [...result.keys()].filter(
     (k) => !trailerNames.includes(k),
@@ -3736,7 +3874,7 @@ function parseTrailer(field: string | null): Headers | undefined {
   }
   const trailerNames = field.split(",").map((v) => v.trim().toLowerCase());
   if (trailerNames.length === 0) {
-    throw new Deno.errors.InvalidData("Empty trailer header.");
+    throw new Deno.errors.InvalidData("Empty trailer header");
   }
   const prohibited = trailerNames.filter((k) => isProhibitedForTrailer(k));
   if (prohibited.length > 0) {
@@ -3760,7 +3898,7 @@ Deno.test(
   },
   async function httpServeCurlH2C() {
     const ac = new AbortController();
-    const server = Deno.serve(
+    await using server = Deno.serve(
       { port: servePort, signal: ac.signal },
       () => new Response("hello world!"),
     );
@@ -3795,7 +3933,7 @@ Deno.test(
     const ac = new AbortController();
     const { resolve } = Promise.withResolvers<void>();
 
-    const server = Deno.serve({
+    await using server = Deno.serve({
       handler: () => {
         const response = new Response("Hello World", {
           headers: {
@@ -3838,7 +3976,7 @@ Deno.test(
   },
   async function httpsServeCurlH2C() {
     const ac = new AbortController();
-    const server = Deno.serve(
+    await using server = Deno.serve(
       {
         signal: ac.signal,
         port: servePort,
@@ -3895,7 +4033,7 @@ Deno.test(
     const { promise, resolve } = Promise.withResolvers<Deno.UnixAddr>();
     const ac = new AbortController();
     const filePath = tmpUnixSocketPath();
-    const server = Deno.serve(
+    await using server = Deno.serve(
       {
         signal: ac.signal,
         path: filePath,
@@ -3920,6 +4058,58 @@ Deno.test(
   },
 );
 
+Deno.test(
+  {
+    ignore: Deno.build.os !== "linux",
+    permissions: { run: true, net: true },
+  },
+  async function httpServerVsockSocket() {
+    const { promise, resolve } = Promise.withResolvers<Deno.VsockAddr>();
+    const ac = new AbortController();
+    await using server = Deno.serve(
+      {
+        signal: ac.signal,
+        cid: -1,
+        port: 8000,
+        onListen(info) {
+          resolve(info);
+        },
+        onError: createOnErrorCb(ac),
+      },
+      (_req, { remoteAddr }) => {
+        assertEquals(remoteAddr.transport, "vsock");
+        assertEquals(remoteAddr.cid, 1);
+        assertEquals(remoteAddr.port, conn.localAddr.port);
+        return new Response("hello world!");
+      },
+    );
+
+    assertEquals((await promise).cid, 4294967295);
+    assertEquals((await promise).port, 8000);
+
+    const conn = await Deno.connect({
+      transport: "vsock",
+      cid: 1,
+      port: 8000,
+    });
+    await conn.write(
+      new TextEncoder().encode("GET / HTTP/1.1\r\nhost: example.com\r\n\r\n"),
+    );
+    const data = new Uint8Array(512);
+    const n = await conn.read(data);
+    const body = new TextDecoder().decode(data.subarray(0, n!));
+
+    assertEquals(
+      "hello world!",
+      body.split("\r\n").at(-1),
+    );
+
+    await conn.close();
+    ac.abort();
+    await server.finished;
+  },
+);
+
 // serve Handler must return Response class or promise that resolves Response class
 Deno.test(
   { permissions: { net: true, run: true } },
@@ -3928,7 +4118,7 @@ Deno.test(
     const listeningDeferred = Promise.withResolvers<void>();
     const ac = new AbortController();
 
-    const server = Deno.serve(
+    await using server = Deno.serve(
       {
         port: servePort,
         onListen: onListen(listeningDeferred.resolve),
@@ -3964,7 +4154,7 @@ Deno.test(
     const { promise, resolve } = Promise.withResolvers<void>();
     const ac = new AbortController();
 
-    const server = Deno.serve(
+    await using server = Deno.serve(
       {
         port: servePort,
         onListen: onListen(resolve),
@@ -4000,7 +4190,7 @@ Deno.test(
     let timer: number | undefined = undefined;
     let _controller;
 
-    const server = Deno.serve(
+    await using server = Deno.serve(
       {
         port: servePort,
         onListen: onListen(resolve),
@@ -4042,3 +4232,199 @@ Deno.test(
     await server.finished;
   },
 );
+
+Deno.test({
+  name: "HTTP Server test (error on non-unix platform)",
+  ignore: Deno.build.os !== "windows",
+}, async () => {
+  await assertRejects(
+    async () => {
+      const ac = new AbortController();
+      await using server = Deno.serve({
+        path: "path/to/socket",
+        handler: (_req) => new Response("Hello, world"),
+        signal: ac.signal,
+        onListen({ path: _path }) {
+          console.log(`Server started at ${_path}`);
+        },
+      });
+      server.finished.then(() => console.log("Server closed"));
+      console.log("Closing server...");
+      ac.abort();
+      await new Promise((resolve) => setTimeout(resolve, 100)); // Example of awaiting something
+    },
+    Error,
+    'Operation `"op_net_listen_unix"` not supported on non-unix platforms.',
+  );
+});
+
+Deno.test({
+  name: "onListen callback gets 0.0.0.0 hostname as is",
+}, async () => {
+  const { promise, resolve } = Promise.withResolvers<{ hostname: string }>();
+
+  await using server = Deno.serve({
+    handler: (_) => new Response("ok"),
+    hostname: "0.0.0.0",
+    port: 0,
+    onListen: resolve,
+  });
+  const { hostname } = await promise;
+  assertEquals(hostname, "0.0.0.0");
+  await server.shutdown();
+});
+
+Deno.test({
+  name: "AbortSignal aborted when request is cancelled",
+}, async () => {
+  const { promise, resolve } = Promise.withResolvers<void>();
+
+  let cancelled = false;
+
+  await using server = Deno.serve({
+    hostname: "0.0.0.0",
+    port: servePort,
+    onListen: () => resolve(),
+  }, async (request) => {
+    request.signal.addEventListener("abort", () => cancelled = true);
+    assert(!request.signal.aborted);
+    await new Promise((resolve) => setTimeout(resolve, 3000)); // abort during waiting
+    assert(request.signal.aborted);
+    return new Response("Ok");
+  });
+
+  await promise;
+  await fetch(`http://localhost:${servePort}/`, {
+    signal: AbortSignal.timeout(1000),
+  }).catch(() => {});
+
+  await server.shutdown();
+
+  assert(cancelled);
+});
+
+Deno.test({
+  name: "AbortSignal event aborted when request is cancelled",
+}, async () => {
+  const { promise, resolve } = Promise.withResolvers<void>();
+
+  await using server = Deno.serve({
+    hostname: "0.0.0.0",
+    port: servePort,
+    onListen: () => resolve(),
+  }, async (request) => {
+    const { promise: promiseAbort, resolve: resolveAbort } = Promise
+      .withResolvers<void>();
+    request.signal.addEventListener("abort", () => resolveAbort());
+    assert(!request.signal.aborted);
+
+    await promiseAbort;
+
+    return new Response("Ok");
+  });
+
+  await promise;
+  await fetch(`http://localhost:${servePort}/`, {
+    signal: AbortSignal.timeout(100),
+  }).catch(() => {});
+
+  await server.shutdown();
+});
+
+// https://github.com/denoland/deno/issues/27083
+Deno.test(
+  { permissions: { net: true } },
+  async function httpServerWebSocketInspectRequest() {
+    const ac = new AbortController();
+    const listeningDeferred = Promise.withResolvers<void>();
+    const doneDeferred = Promise.withResolvers<void>();
+    await using server = Deno.serve({
+      handler: (request) => {
+        const {
+          response,
+          socket,
+        } = Deno.upgradeWebSocket(request);
+
+        socket.onopen = () => {
+          Deno.inspect(request); // should not throw
+        };
+        socket.onerror = (e) => {
+          console.error(e);
+          fail();
+        };
+        socket.onmessage = (m) => {
+          socket.send(m.data);
+          socket.close(1001);
+        };
+        socket.onclose = () => doneDeferred.resolve();
+        return response;
+      },
+      port: servePort,
+      signal: ac.signal,
+      onListen: onListen(listeningDeferred.resolve),
+      onError: createOnErrorCb(ac),
+    });
+
+    await listeningDeferred.promise;
+    const def = Promise.withResolvers<void>();
+    const ws = new WebSocket(`ws://localhost:${servePort}`);
+    ws.onmessage = (m) => assertEquals(m.data, "foo");
+    ws.onerror = (e) => {
+      console.error(e);
+      fail();
+    };
+    ws.onclose = () => def.resolve();
+    ws.onopen = () => ws.send("foo");
+
+    await def.promise;
+    await doneDeferred.promise;
+    ac.abort();
+    await server.finished;
+  },
+);
+
+Deno.test({
+  name:
+    "req.body.getReader().read() throws the error with reasonable error message",
+}, async () => {
+  const { promise, resolve, reject } = Promise.withResolvers<Error>();
+  const server = Deno.serve({ onListen, port: 0 }, async (req) => {
+    const reader = req.body!.getReader();
+
+    try {
+      while (true) {
+        await delay(100);
+        const { done } = await reader.read();
+        if (done) break;
+      }
+    } catch (e) {
+      // deno-lint-ignore no-explicit-any
+      resolve(e as any);
+    }
+
+    reject(new Error("Should not reach here"));
+    server.shutdown();
+    return new Response();
+  });
+
+  async function onListen({ port }: { port: number }) {
+    const body = "a".repeat(1000);
+    const header = `POST / HTTP/1.1\r\n` +
+      `Host: 127.0.0.1:${port}\r\n` +
+      `Content-Length: 1000\r\n` +
+      "\r\n";
+
+    const connection = await Deno.connect({ hostname: "127.0.0.1", port });
+    await connection.write(new TextEncoder().encode(header));
+    await delay(100);
+    await connection.write(new TextEncoder().encode(body));
+    connection.close();
+  }
+  await server.finished;
+  const e = await promise;
+  assertIsError(
+    e,
+    Deno.errors.BadResource,
+    "Cannot read request body as underlying resource unavailable",
+  );
+});

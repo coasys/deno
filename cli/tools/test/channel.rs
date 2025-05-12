@@ -1,17 +1,7 @@
-// Copyright 2018-2024 the Deno authors. All rights reserved. MIT license.
+// Copyright 2018-2025 the Deno authors. MIT license.
 
-use super::TestEvent;
-use super::TestStdioStream;
-use deno_core::futures::future::poll_fn;
-use deno_core::parking_lot;
-use deno_core::parking_lot::lock_api::RawMutex;
-use deno_core::parking_lot::lock_api::RawMutexTimed;
-use deno_runtime::deno_io::pipe;
-use deno_runtime::deno_io::AsyncPipeRead;
-use deno_runtime::deno_io::PipeRead;
-use deno_runtime::deno_io::PipeWrite;
-use memmem::Searcher;
 use std::fmt::Display;
+use std::future::poll_fn;
 use std::future::Future;
 use std::io::Write;
 use std::pin::Pin;
@@ -20,6 +10,14 @@ use std::sync::atomic::Ordering;
 use std::task::ready;
 use std::task::Poll;
 use std::time::Duration;
+
+use deno_core::parking_lot;
+use deno_core::parking_lot::lock_api::RawMutex;
+use deno_core::parking_lot::lock_api::RawMutexTimed;
+use deno_runtime::deno_io::pipe;
+use deno_runtime::deno_io::AsyncPipeRead;
+use deno_runtime::deno_io::PipeRead;
+use deno_runtime::deno_io::PipeWrite;
 use tokio::io::AsyncRead;
 use tokio::io::AsyncReadExt;
 use tokio::io::ReadBuf;
@@ -27,6 +25,8 @@ use tokio::sync::mpsc::error::SendError;
 use tokio::sync::mpsc::UnboundedReceiver;
 use tokio::sync::mpsc::UnboundedSender;
 use tokio::sync::mpsc::WeakUnboundedSender;
+
+use super::TestEvent;
 
 /// 8-byte sync marker that is unlikely to appear in normal output. Equivalent
 /// to the string `"\u{200B}\0\u{200B}\0"`.
@@ -36,7 +36,8 @@ const HALF_SYNC_MARKER: &[u8; 4] = &[226, 128, 139, 0];
 const BUFFER_SIZE: usize = 4096;
 
 /// The test channel has been closed and cannot be used to send further messages.
-#[derive(Debug, Copy, Clone, Eq, PartialEq)]
+#[derive(Debug, Copy, Clone, Eq, PartialEq, deno_error::JsError)]
+#[class(generic)]
 pub struct ChannelClosedError;
 
 impl std::error::Error for ChannelClosedError {}
@@ -105,7 +106,6 @@ impl TestEventReceiver {
 
 struct TestStream {
   id: usize,
-  which: TestStdioStream,
   read_opt: Option<AsyncPipeRead>,
   sender: UnboundedSender<(usize, TestEvent)>,
 }
@@ -113,7 +113,6 @@ struct TestStream {
 impl TestStream {
   fn new(
     id: usize,
-    which: TestStdioStream,
     pipe_reader: PipeRead,
     sender: UnboundedSender<(usize, TestEvent)>,
   ) -> std::io::Result<Self> {
@@ -121,7 +120,6 @@ impl TestStream {
     let read_opt = Some(pipe_reader.into_async()?);
     Ok(Self {
       id,
-      which,
       read_opt,
       sender,
     })
@@ -135,7 +133,7 @@ impl TestStream {
       true
     } else if self
       .sender
-      .send((self.id, TestEvent::Output(self.which, buffer)))
+      .send((self.id, TestEvent::Output(buffer)))
       .is_err()
     {
       self.read_opt.take();
@@ -223,10 +221,11 @@ impl TestStream {
           // from before. There's still a possibility that the marker could be split because of a pipe
           // buffer that fills up, forcing the flush to be written across two writes and interleaving
           // data between, but that's a risk we take with this sync marker approach.
-          let searcher = memmem::TwoWaySearcher::new(HALF_SYNC_MARKER);
           let start =
             (flush.len() - read).saturating_sub(HALF_SYNC_MARKER.len());
-          if let Some(offset) = searcher.search_in(&flush[start..]) {
+          if let Some(offset) =
+            memchr::memmem::find(&flush[start..], HALF_SYNC_MARKER)
+          {
             flush.truncate(offset);
             // Try to send our flushed buffer. If the channel is closed, this stream will
             // be marked as not alive.
@@ -275,14 +274,9 @@ impl TestEventSenderFactory {
         .build()
         .unwrap();
       runtime.block_on(tokio::task::unconstrained(async move {
-        let mut test_stdout = TestStream::new(
-          id,
-          TestStdioStream::Stdout,
-          stdout_reader,
-          sender.clone(),
-        )?;
-        let mut test_stderr =
-          TestStream::new(id, TestStdioStream::Stderr, stderr_reader, sender)?;
+        let mut test_stdout =
+          TestStream::new(id, stdout_reader, sender.clone())?;
+        let mut test_stderr = TestStream::new(id, stderr_reader, sender)?;
 
         // This ensures that the stdout and stderr streams in the select! loop below cannot starve each
         // other.
@@ -446,10 +440,11 @@ impl TestEventSender {
 #[allow(clippy::print_stderr)]
 #[cfg(test)]
 mod tests {
-  use super::*;
-  use crate::tools::test::TestResult;
   use deno_core::unsync::spawn;
   use deno_core::unsync::spawn_blocking;
+
+  use super::*;
+  use crate::tools::test::TestResult;
 
   /// Test that output is correctly interleaved with messages.
   #[tokio::test]
@@ -488,7 +483,7 @@ mod tests {
     let mut count = 0;
     for message in messages {
       match message {
-        TestEvent::Output(_, vec) => {
+        TestEvent::Output(vec) => {
           assert_eq!(vec[0], expected);
           count += vec.len();
         }
@@ -619,7 +614,7 @@ mod tests {
       while let Some((_, message)) = receiver.recv().await {
         if i % 2 == 0 {
           let expected_text = format!("{:08x}", i / 2).into_bytes();
-          let TestEvent::Output(TestStdioStream::Stderr, text) = message else {
+          let TestEvent::Output(text) = message else {
             panic!("Incorrect message: {message:?}");
           };
           assert_eq!(text, expected_text);
@@ -665,7 +660,7 @@ mod tests {
         .unwrap();
       drop(worker);
       let (_, message) = receiver.recv().await.unwrap();
-      let TestEvent::Output(TestStdioStream::Stderr, text) = message else {
+      let TestEvent::Output(text) = message else {
         panic!("Incorrect message: {message:?}");
       };
       assert_eq!(text.as_slice(), b"hello");

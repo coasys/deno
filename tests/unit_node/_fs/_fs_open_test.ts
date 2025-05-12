@@ -1,4 +1,4 @@
-// Copyright 2018-2024 the Deno authors. All rights reserved. MIT license.
+// Copyright 2018-2025 the Deno authors. MIT license.
 import {
   O_APPEND,
   O_CREAT,
@@ -9,7 +9,7 @@ import {
   O_TRUNC,
   O_WRONLY,
 } from "node:constants";
-import { assertEquals, assertThrows, fail } from "@std/assert/mod.ts";
+import { assertEquals, assertThrows, fail } from "@std/assert";
 import { assertCallbackErrorUncaught } from "../_test_utils.ts";
 import { open, openSync } from "node:fs";
 import { join, parse } from "node:path";

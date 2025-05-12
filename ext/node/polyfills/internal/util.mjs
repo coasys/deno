@@ -1,4 +1,4 @@
-// Copyright 2018-2023 the Deno authors. All rights reserved. MIT license.
+// Copyright 2018-2025 the Deno authors. MIT license.
 
 // TODO(petamoriken): enable prefer-primordials for node polyfills
 // deno-lint-ignore-file prefer-primordials
@@ -15,6 +15,10 @@ import {
 } from "ext:deno_node/internal/primordials.mjs";
 import { ERR_UNKNOWN_SIGNAL } from "ext:deno_node/internal/errors.ts";
 import { os } from "ext:deno_node/internal_binding/constants.ts";
+import { primordials } from "ext:core/mod.js";
+const {
+  SafeWeakRef,
+} = primordials;
 
 export const customInspectSymbol = Symbol.for("nodejs.util.inspect.custom");
 export const kEnumerableProperty = Object.create(null);
@@ -29,17 +33,6 @@ export function once(callback) {
     called = true;
     Reflect.apply(callback, this, args);
   };
-}
-
-export function createDeferredPromise() {
-  let resolve;
-  let reject;
-  const promise = new Promise((res, rej) => {
-    resolve = res;
-    reject = rej;
-  });
-
-  return { promise, resolve, reject };
 }
 
 // In addition to being accessible through util.promisify.custom,
@@ -135,11 +128,42 @@ export function convertToValidSignal(signal) {
   throw new ERR_UNKNOWN_SIGNAL(signal);
 }
 
+export class WeakReference {
+  #weak = null;
+  #strong = null;
+  #refCount = 0;
+  constructor(object) {
+    this.#weak = new SafeWeakRef(object);
+  }
+
+  incRef() {
+    this.#refCount++;
+    if (this.#refCount === 1) {
+      const derefed = this.#weak.deref();
+      if (derefed !== undefined) {
+        this.#strong = derefed;
+      }
+    }
+    return this.#refCount;
+  }
+
+  decRef() {
+    this.#refCount--;
+    if (this.#refCount === 0) {
+      this.#strong = null;
+    }
+    return this.#refCount;
+  }
+
+  get() {
+    return this.#weak.deref();
+  }
+}
+
 promisify.custom = kCustomPromisifiedSymbol;
 
 export default {
   convertToValidSignal,
-  createDeferredPromise,
   customInspectSymbol,
   customPromisifyArgs,
   kEmptyObject,

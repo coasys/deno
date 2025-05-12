@@ -1,4 +1,4 @@
-// Copyright 2018-2024 the Deno authors. All rights reserved. MIT license.
+// Copyright 2018-2025 the Deno authors. MIT license.
 
 // The logic of this module is heavily influenced by path-to-regexp at:
 // https://github.com/pillarjs/path-to-regexp/ which is licensed as follows:
@@ -26,15 +26,16 @@
 // THE SOFTWARE.
 //
 
+use std::collections::HashMap;
+use std::fmt;
+use std::fmt::Write as _;
+use std::iter::Peekable;
+
 use deno_core::anyhow::anyhow;
 use deno_core::error::AnyError;
 use fancy_regex::Regex as FancyRegex;
 use once_cell::sync::Lazy;
 use regex::Regex;
-use std::collections::HashMap;
-use std::fmt;
-use std::fmt::Write as _;
-use std::iter::Peekable;
 
 static ESCAPE_STRING_RE: Lazy<Regex> =
   lazy_regex::lazy_regex!(r"([.+*?=^!:${}()\[\]|/\\])");
@@ -795,8 +796,6 @@ impl Compiler {
 
 #[derive(Debug)]
 pub struct MatchResult {
-  pub path: String,
-  pub index: usize,
   pub params: HashMap<StringOrNumber, StringOrVec>,
 }
 
@@ -824,9 +823,6 @@ impl Matcher {
   /// Match a string path, optionally returning the match result.
   pub fn matches(&self, path: &str) -> Option<MatchResult> {
     let caps = self.re.captures(path).ok()??;
-    let m = caps.get(0)?;
-    let path = m.as_str().to_string();
-    let index = m.start();
     let mut params = HashMap::new();
     if let Some(keys) = &self.maybe_keys {
       for (i, key) in keys.iter().enumerate() {
@@ -852,11 +848,7 @@ impl Matcher {
       }
     }
 
-    Some(MatchResult {
-      path,
-      index,
-      params,
-    })
+    Some(MatchResult { params })
   }
 }
 

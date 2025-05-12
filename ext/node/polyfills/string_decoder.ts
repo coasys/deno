@@ -1,4 +1,4 @@
-// Copyright 2018-2024 the Deno authors. All rights reserved. MIT license.
+// Copyright 2018-2025 the Deno authors. MIT license.
 // Copyright Joyent, Inc. and other Node contributors.
 //
 // Permission is hereby granted, free of charge, to any person obtaining a
@@ -20,9 +20,6 @@
 // OTHERWISE, ARISING FROM, OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE
 // USE OR OTHER DEALINGS IN THE SOFTWARE.
 
-// TODO(petamoriken): enable prefer-primordials for node polyfills
-// deno-lint-ignore-file prefer-primordials
-
 // Logic and comments translated pretty much one-to-one from node's impl
 // (https://github.com/nodejs/node/blob/ba06c5c509956dc413f91b755c1c93798bb700d4/src/string_decoder.cc)
 
@@ -35,11 +32,19 @@ import {
   NodeError,
 } from "ext:deno_node/internal/errors.ts";
 
-import { primordials } from "ext:core/mod.js";
+import { core, primordials } from "ext:core/mod.js";
 const {
   ArrayBufferIsView,
   ObjectDefineProperties,
+  Symbol,
+  MathMin,
+  DataViewPrototypeGetBuffer,
+  ObjectPrototypeIsPrototypeOf,
+  String,
+  TypedArrayPrototypeGetBuffer,
+  StringPrototypeToLowerCase,
 } = primordials;
+const { isTypedArray } = core;
 
 const { MAX_STRING_LENGTH } = constants;
 
@@ -50,7 +55,7 @@ type Any = any;
 function normalizeEncoding(enc?: string): string {
   const encoding = castEncoding(enc ?? null);
   if (!encoding) {
-    if (typeof enc !== "string" || enc.toLowerCase() !== "raw") {
+    if (typeof enc !== "string" || StringPrototypeToLowerCase(enc) !== "raw") {
       throw new ERR_UNKNOWN_ENCODING(
         enc as Any,
       );
@@ -64,7 +69,8 @@ function normalizeEncoding(enc?: string): string {
  */
 
 function isBufferType(buf: Buffer) {
-  return buf instanceof Buffer && buf.BYTES_PER_ELEMENT;
+  return ObjectPrototypeIsPrototypeOf(Buffer.prototype, buf) &&
+    buf.BYTES_PER_ELEMENT;
 }
 
 function normalizeBuffer(buf: Buffer) {
@@ -79,7 +85,9 @@ function normalizeBuffer(buf: Buffer) {
     return buf;
   } else {
     return Buffer.from(
-      buf.buffer,
+      isTypedArray(buf)
+        ? TypedArrayPrototypeGetBuffer(buf)
+        : DataViewPrototypeGetBuffer(buf),
     );
   }
 }
@@ -94,6 +102,7 @@ function bufferToString(
   if (len > MAX_STRING_LENGTH) {
     throw new NodeError("ERR_STRING_TOO_LONG", "string exceeds maximum length");
   }
+  // deno-lint-ignore prefer-primordials
   return buf.toString(encoding as Any, start, end);
 }
 
@@ -136,7 +145,7 @@ function decode(this: StringDecoder, buf: Buffer) {
         }
       }
 
-      const bytesToCopy = Math.min(buf.length - bufIdx, this[kMissingBytes]);
+      const bytesToCopy = MathMin(buf.length - bufIdx, this[kMissingBytes]);
       buf.copy(
         this.lastChar,
         this[kBufferedBytes],
@@ -394,6 +403,7 @@ StringDecoder.prototype.text = function text(
 
 ObjectDefineProperties(StringDecoder.prototype, {
   lastNeed: {
+    __proto__: null,
     configurable: true,
     enumerable: true,
     get(this: StringDecoder): number {
@@ -401,6 +411,7 @@ ObjectDefineProperties(StringDecoder.prototype, {
     },
   },
   lastTotal: {
+    __proto__: null,
     configurable: true,
     enumerable: true,
     get(this: StringDecoder): number {

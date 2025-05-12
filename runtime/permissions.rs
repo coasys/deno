@@ -1,268 +1,175 @@
-// Copyright 2018-2024 the Deno authors. All rights reserved. MIT license.
+// Copyright 2018-2025 the Deno authors. MIT license.
 
-use std::borrow::Cow;
 use std::path::Path;
+use std::path::PathBuf;
 
-use deno_core::error::AnyError;
-use deno_core::url::Url;
-pub use deno_io::fs::FsError;
-pub use deno_permissions::create_child_permissions;
-pub use deno_permissions::parse_sys_kind;
-pub use deno_permissions::set_prompt_callbacks;
-pub use deno_permissions::ChildPermissionsArg;
-pub use deno_permissions::Permissions;
-pub use deno_permissions::PermissionsOptions;
+use deno_path_util::normalize_path;
+use deno_permissions::AllowRunDescriptor;
+use deno_permissions::AllowRunDescriptorParseResult;
+use deno_permissions::DenyRunDescriptor;
+use deno_permissions::EnvDescriptor;
+use deno_permissions::FfiDescriptor;
+use deno_permissions::ImportDescriptor;
+use deno_permissions::NetDescriptor;
+use deno_permissions::PathQueryDescriptor;
+use deno_permissions::PathResolveError;
+use deno_permissions::ReadDescriptor;
+use deno_permissions::RunDescriptorParseError;
+use deno_permissions::RunQueryDescriptor;
+use deno_permissions::SysDescriptor;
+use deno_permissions::SysDescriptorParseError;
+use deno_permissions::WriteDescriptor;
 
-// NOTE: Temporary permissions container to satisfy traits. We are migrating to the deno_permissions
-// crate.
-#[derive(Debug, Clone)]
+#[derive(Debug)]
+pub struct RuntimePermissionDescriptorParser<
+  TSys: sys_traits::EnvCurrentDir + Send + Sync,
+> {
+  sys: TSys,
+}
 
-pub struct PermissionsContainer(pub deno_permissions::PermissionsContainer);
-
-impl PermissionsContainer {
-  pub fn new(permissions: deno_permissions::Permissions) -> Self {
-    Self(deno_permissions::PermissionsContainer::new(permissions))
+impl<TSys: sys_traits::EnvCurrentDir + Send + Sync>
+  RuntimePermissionDescriptorParser<TSys>
+{
+  pub fn new(sys: TSys) -> Self {
+    Self { sys }
   }
 
-  pub fn allow_all() -> Self {
-    Self(deno_permissions::PermissionsContainer::allow_all())
+  fn resolve_from_cwd(&self, path: &str) -> Result<PathBuf, PathResolveError> {
+    if path.is_empty() {
+      return Err(PathResolveError::EmptyPath);
+    }
+    let path = Path::new(path);
+    if path.is_absolute() {
+      Ok(normalize_path(path))
+    } else {
+      let cwd = self.resolve_cwd()?;
+      Ok(normalize_path(cwd.join(path)))
+    }
+  }
+
+  fn resolve_cwd(&self) -> Result<PathBuf, PathResolveError> {
+    self
+      .sys
+      .env_current_dir()
+      .map_err(PathResolveError::CwdResolve)
   }
 }
 
-impl std::ops::Deref for PermissionsContainer {
-  type Target = deno_permissions::PermissionsContainer;
-
-  fn deref(&self) -> &Self::Target {
-    &self.0
-  }
-}
-
-impl std::ops::DerefMut for PermissionsContainer {
-  fn deref_mut(&mut self) -> &mut Self::Target {
-    &mut self.0
-  }
-}
-
-impl deno_node::NodePermissions for PermissionsContainer {
-  #[inline(always)]
-  fn check_net_url(
-    &mut self,
-    url: &Url,
-    api_name: &str,
-  ) -> Result<(), AnyError> {
-    self.0.check_net_url(url, api_name)
-  }
-
-  #[inline(always)]
-  fn check_read_with_api_name(
+impl<TSys: sys_traits::EnvCurrentDir + Send + Sync + std::fmt::Debug>
+  deno_permissions::PermissionDescriptorParser
+  for RuntimePermissionDescriptorParser<TSys>
+{
+  fn parse_read_descriptor(
     &self,
-    path: &Path,
-    api_name: Option<&str>,
-  ) -> Result<(), AnyError> {
-    self.0.check_read_with_api_name(path, api_name)
+    text: &str,
+  ) -> Result<ReadDescriptor, PathResolveError> {
+    Ok(ReadDescriptor(self.resolve_from_cwd(text)?))
   }
 
-  #[inline(always)]
-  fn check_write_with_api_name(
+  fn parse_write_descriptor(
     &self,
-    path: &Path,
-    api_name: Option<&str>,
-  ) -> Result<(), AnyError> {
-    self.0.check_write_with_api_name(path, api_name)
+    text: &str,
+  ) -> Result<WriteDescriptor, PathResolveError> {
+    Ok(WriteDescriptor(self.resolve_from_cwd(text)?))
   }
 
-  fn check_sys(&self, kind: &str, api_name: &str) -> Result<(), AnyError> {
-    self.0.check_sys(kind, api_name)
-  }
-}
-
-impl deno_fetch::FetchPermissions for PermissionsContainer {
-  #[inline(always)]
-  fn check_net_url(
-    &mut self,
-    url: &Url,
-    api_name: &str,
-  ) -> Result<(), AnyError> {
-    self.0.check_net_url(url, api_name)
+  fn parse_net_descriptor(
+    &self,
+    text: &str,
+  ) -> Result<NetDescriptor, deno_permissions::NetDescriptorParseError> {
+    NetDescriptor::parse(text)
   }
 
-  #[inline(always)]
-  fn check_read(
-    &mut self,
-    path: &Path,
-    api_name: &str,
-  ) -> Result<(), AnyError> {
-    self.0.check_read(path, api_name)
-  }
-}
-
-impl deno_net::NetPermissions for PermissionsContainer {
-  #[inline(always)]
-  fn check_net<T: AsRef<str>>(
-    &mut self,
-    host: &(T, Option<u16>),
-    api_name: &str,
-  ) -> Result<(), AnyError> {
-    self.0.check_net(host, api_name)
+  fn parse_import_descriptor(
+    &self,
+    text: &str,
+  ) -> Result<ImportDescriptor, deno_permissions::NetDescriptorParseError> {
+    ImportDescriptor::parse(text)
   }
 
-  #[inline(always)]
-  fn check_read(
-    &mut self,
-    path: &Path,
-    api_name: &str,
-  ) -> Result<(), AnyError> {
-    self.0.check_read(path, api_name)
-  }
-
-  #[inline(always)]
-  fn check_write(
-    &mut self,
-    path: &Path,
-    api_name: &str,
-  ) -> Result<(), AnyError> {
-    self.0.check_write(path, api_name)
-  }
-}
-
-impl deno_web::TimersPermission for PermissionsContainer {
-  #[inline(always)]
-  fn allow_hrtime(&mut self) -> bool {
-    self.0.allow_hrtime()
-  }
-}
-
-impl deno_websocket::WebSocketPermissions for PermissionsContainer {
-  #[inline(always)]
-  fn check_net_url(
-    &mut self,
-    url: &Url,
-    api_name: &str,
-  ) -> Result<(), AnyError> {
-    self.0.check_net_url(url, api_name)
-  }
-}
-
-impl deno_fs::FsPermissions for PermissionsContainer {
-  fn check_open<'a>(
-    &mut self,
-    resolved: bool,
-    read: bool,
-    write: bool,
-    path: &'a Path,
-    api_name: &str,
-  ) -> Result<Cow<'a, Path>, FsError> {
-    if resolved {
-      self.check_special_file(path, api_name).map_err(|_| {
-        std::io::Error::from(std::io::ErrorKind::PermissionDenied)
-      })?;
-      return Ok(Cow::Borrowed(path));
+  fn parse_env_descriptor(
+    &self,
+    text: &str,
+  ) -> Result<EnvDescriptor, deno_permissions::EnvDescriptorParseError> {
+    if text.is_empty() {
+      Err(deno_permissions::EnvDescriptorParseError)
+    } else {
+      Ok(EnvDescriptor::new(text))
     }
+  }
 
-    // If somehow read or write aren't specified, use read
-    let read = read || !write;
-    if read {
-      deno_fs::FsPermissions::check_read(self, path, api_name)
-        .map_err(|_| FsError::PermissionDenied("read"))?;
+  fn parse_sys_descriptor(
+    &self,
+    text: &str,
+  ) -> Result<SysDescriptor, SysDescriptorParseError> {
+    if text.is_empty() {
+      Err(SysDescriptorParseError::Empty)
+    } else {
+      Ok(SysDescriptor::parse(text.to_string())?)
     }
-    if write {
-      deno_fs::FsPermissions::check_write(self, path, api_name)
-        .map_err(|_| FsError::PermissionDenied("write"))?;
+  }
+
+  fn parse_allow_run_descriptor(
+    &self,
+    text: &str,
+  ) -> Result<AllowRunDescriptorParseResult, RunDescriptorParseError> {
+    Ok(AllowRunDescriptor::parse(text, &self.resolve_cwd()?)?)
+  }
+
+  fn parse_deny_run_descriptor(
+    &self,
+    text: &str,
+  ) -> Result<DenyRunDescriptor, PathResolveError> {
+    Ok(DenyRunDescriptor::parse(text, &self.resolve_cwd()?))
+  }
+
+  fn parse_ffi_descriptor(
+    &self,
+    text: &str,
+  ) -> Result<FfiDescriptor, PathResolveError> {
+    Ok(FfiDescriptor(self.resolve_from_cwd(text)?))
+  }
+
+  // queries
+
+  fn parse_path_query(
+    &self,
+    path: &str,
+  ) -> Result<PathQueryDescriptor, PathResolveError> {
+    Ok(PathQueryDescriptor {
+      resolved: self.resolve_from_cwd(path)?,
+      requested: path.to_string(),
+    })
+  }
+
+  fn parse_run_query(
+    &self,
+    requested: &str,
+  ) -> Result<RunQueryDescriptor, RunDescriptorParseError> {
+    if requested.is_empty() {
+      return Err(RunDescriptorParseError::EmptyRunQuery);
     }
-    Ok(Cow::Borrowed(path))
-  }
-
-  fn check_read(
-    &mut self,
-    path: &Path,
-    api_name: &str,
-  ) -> Result<(), AnyError> {
-    self.0.check_read(path, api_name)
-  }
-
-  fn check_read_blind(
-    &mut self,
-    path: &Path,
-    display: &str,
-    api_name: &str,
-  ) -> Result<(), AnyError> {
-    self.0.check_read_blind(path, display, api_name)
-  }
-
-  fn check_write(
-    &mut self,
-    path: &Path,
-    api_name: &str,
-  ) -> Result<(), AnyError> {
-    self.0.check_write(path, api_name)
-  }
-
-  fn check_write_partial(
-    &mut self,
-    path: &Path,
-    api_name: &str,
-  ) -> Result<(), AnyError> {
-    self.0.check_write_partial(path, api_name)
-  }
-
-  fn check_write_blind(
-    &mut self,
-    p: &Path,
-    display: &str,
-    api_name: &str,
-  ) -> Result<(), AnyError> {
-    self.0.check_write_blind(p, display, api_name)
-  }
-
-  fn check_read_all(&mut self, api_name: &str) -> Result<(), AnyError> {
-    self.0.check_read_all(api_name)
-  }
-
-  fn check_write_all(&mut self, api_name: &str) -> Result<(), AnyError> {
-    self.0.check_write_all(api_name)
+    RunQueryDescriptor::parse(requested)
+      .map_err(RunDescriptorParseError::PathResolve)
   }
 }
 
-// NOTE(bartlomieju): for now, NAPI uses `--allow-ffi` flag, but that might
-// change in the future.
-impl deno_napi::NapiPermissions for PermissionsContainer {
-  #[inline(always)]
-  fn check(&mut self, path: Option<&Path>) -> Result<(), AnyError> {
-    self.0.check_ffi(path)
-  }
-}
+#[cfg(test)]
+mod test {
+  use deno_permissions::PermissionDescriptorParser;
 
-impl deno_ffi::FfiPermissions for PermissionsContainer {
-  #[inline(always)]
-  fn check_partial(&mut self, path: Option<&Path>) -> Result<(), AnyError> {
-    self.0.check_ffi_partial(path)
-  }
-}
+  use super::*;
 
-impl deno_kv::sqlite::SqliteDbHandlerPermissions for PermissionsContainer {
-  #[inline(always)]
-  fn check_read(&mut self, p: &Path, api_name: &str) -> Result<(), AnyError> {
-    self.0.check_read(p, api_name)
-  }
-
-  #[inline(always)]
-  fn check_write(&mut self, p: &Path, api_name: &str) -> Result<(), AnyError> {
-    self.0.check_write(p, api_name)
-  }
-}
-
-impl deno_kv::remote::RemoteDbHandlerPermissions for PermissionsContainer {
-  #[inline(always)]
-  fn check_env(&mut self, var: &str) -> Result<(), AnyError> {
-    self.0.check_env(var)
-  }
-
-  #[inline(always)]
-  fn check_net_url(
-    &mut self,
-    url: &Url,
-    api_name: &str,
-  ) -> Result<(), AnyError> {
-    self.0.check_net_url(url, api_name)
+  #[test]
+  fn test_handle_empty_value() {
+    let parser =
+      RuntimePermissionDescriptorParser::new(sys_traits::impls::RealSys);
+    assert!(parser.parse_read_descriptor("").is_err());
+    assert!(parser.parse_write_descriptor("").is_err());
+    assert!(parser.parse_env_descriptor("").is_err());
+    assert!(parser.parse_net_descriptor("").is_err());
+    assert!(parser.parse_ffi_descriptor("").is_err());
+    assert!(parser.parse_path_query("").is_err());
+    assert!(parser.parse_run_query("").is_err());
   }
 }

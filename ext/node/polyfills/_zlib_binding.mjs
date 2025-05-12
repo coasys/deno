@@ -1,4 +1,4 @@
-// Copyright 2018-2023 the Deno authors. All rights reserved. MIT license.
+// Copyright 2018-2025 the Deno authors. MIT license.
 
 // deno-lint-ignore-file
 
@@ -46,17 +46,19 @@ export const UNZIP = 7;
 import {
   op_zlib_close,
   op_zlib_close_if_pending,
+  op_zlib_err_msg,
   op_zlib_init,
   op_zlib_new,
   op_zlib_reset,
   op_zlib_write,
-  op_zlib_write_async,
 } from "ext:core/ops";
+import process from "node:process";
 
 const writeResult = new Uint32Array(2);
 
 class Zlib {
   #handle;
+  #dictionary;
 
   constructor(mode) {
     this.#handle = op_zlib_new(mode);
@@ -104,7 +106,11 @@ class Zlib {
         // normal statuses, not fatal
         break;
       case Z_NEED_DICT:
-        this.#error("Bad dictionary", err);
+        if (this.#dictionary && this.#dictionary.length > 0) {
+          this.#error("Bad dictionary", err);
+        } else {
+          this.#error("Missing dictionary", err);
+        }
         return false;
       default:
         // something else.
@@ -124,18 +130,20 @@ class Zlib {
     out_off,
     out_len,
   ) {
-    op_zlib_write_async(
-      this.#handle,
-      flush ?? Z_NO_FLUSH,
-      input,
-      in_off,
-      in_len,
-      out,
-      out_off,
-      out_len,
-    ).then(([err, availOut, availIn]) => {
-      if (this.#checkError(err)) {
-        this.callback(availIn, availOut);
+    process.nextTick(() => {
+      const res = this.writeSync(
+        flush ?? Z_NO_FLUSH,
+        input,
+        in_off,
+        in_len,
+        out,
+        out_off,
+        out_len,
+      );
+
+      if (res) {
+        const [availOut, availIn] = res;
+        this.callback(availOut, availIn);
       }
     });
 
@@ -158,6 +166,8 @@ class Zlib {
       dictionary ?? new Uint8Array(0),
     );
 
+    this.#dictionary = dictionary;
+
     if (err != Z_OK) {
       this.#error("Failed to initialize zlib", err);
     }
@@ -175,6 +185,7 @@ class Zlib {
   }
 
   #error(message, err) {
+    message = op_zlib_err_msg(this.#handle) ?? message;
     this.onerror(message, err);
     op_zlib_close_if_pending(this.#handle);
   }

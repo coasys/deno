@@ -1,4 +1,4 @@
-// Copyright 2018-2024 the Deno authors. All rights reserved. MIT license.
+// Copyright 2018-2025 the Deno authors. MIT license.
 
 import {
   assertEquals,
@@ -6,7 +6,7 @@ import {
   assertRejects,
   assertThrows,
   unreachable,
-} from "@std/assert/mod.ts";
+} from "@std/assert";
 
 Deno.test("fragment", () => {
   assertThrows(() => new WebSocketStream("ws://localhost:4242/#"));

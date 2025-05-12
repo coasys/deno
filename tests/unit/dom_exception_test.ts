@@ -1,4 +1,4 @@
-// Copyright 2018-2024 the Deno authors. All rights reserved. MIT license.
+// Copyright 2018-2025 the Deno authors. MIT license.
 
 import {
   assert,
@@ -23,8 +23,10 @@ Deno.test(function nameToCodeMappingPrototypeAccess() {
   Reflect.deleteProperty(objectPrototype, "pollution");
 });
 
-Deno.test(function callSitesEvalsDoesntThrow() {
+Deno.test(function hasStackAccessor() {
   const e2 = new DOMException("asdf");
-  // @ts-ignore no types for `__callSiteEvals` but it's observable.
-  assert(Array.isArray(e2.__callSiteEvals));
+  const desc = Object.getOwnPropertyDescriptor(e2, "stack");
+  assert(desc);
+  assert(typeof desc.get === "function");
+  assert(typeof desc.set === "function");
 });

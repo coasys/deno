@@ -1,5 +1,11 @@
-// Copyright 2018-2024 the Deno authors. All rights reserved. MIT license.
-import { assert, assertEquals, assertThrows, fail } from "./test_util.ts";
+// Copyright 2018-2025 the Deno authors. MIT license.
+import {
+  assert,
+  assertEquals,
+  assertThrows,
+  delay,
+  fail,
+} from "./test_util.ts";
 
 const servePort = 4248;
 const serveUrl = `ws://localhost:${servePort}/`;
@@ -7,7 +13,7 @@ const serveUrl = `ws://localhost:${servePort}/`;
 Deno.test({ permissions: "none" }, function websocketPermissionless() {
   assertThrows(
     () => new WebSocket("ws://localhost"),
-    Deno.errors.PermissionDenied,
+    Deno.errors.NotCapable,
   );
 });
 
@@ -262,7 +268,7 @@ Deno.test({
       socket.onopen = () => socket.send("Hello");
       socket.onmessage = () => {
         socket.send("Bye");
-        socket.close();
+        socket.close(1000);
       };
       socket.onclose = () => ac.abort();
       socket.onerror = () => fail();
@@ -288,7 +294,8 @@ Deno.test({
       seenBye = true;
     }
   };
-  ws.onclose = () => {
+  ws.onclose = (e) => {
+    assertEquals(e.code, 1000);
     deferred.resolve();
   };
   await Promise.all([deferred.promise, server.finished]);
@@ -453,7 +460,8 @@ Deno.test("invalid server", async () => {
   const { promise, resolve } = Promise.withResolvers<void>();
   const ws = new WebSocket("ws://localhost:2121");
   let err = false;
-  ws.onerror = () => {
+  ws.onerror = (e) => {
+    assert("error" in e);
     err = true;
   };
   ws.onclose = () => {
@@ -706,6 +714,31 @@ Deno.test("echo arraybuffer with binaryType arraybuffer", async () => {
   await promise;
 });
 
+Deno.test("echo blob mixed with string", async () => {
+  const { promise, resolve } = Promise.withResolvers<void>();
+  const ws = new WebSocket("ws://localhost:4242");
+  ws.binaryType = "arraybuffer";
+  const blob = new Blob(["foo"]);
+  ws.onerror = () => fail();
+  ws.onopen = () => {
+    ws.send(blob);
+    ws.send("bar");
+  };
+  const messages: (ArrayBuffer | string)[] = [];
+  ws.onmessage = (e) => {
+    messages.push(e.data);
+    if (messages.length === 2) {
+      assertEquals(messages[0], new Uint8Array([102, 111, 111]).buffer);
+      assertEquals(messages[1], "bar");
+      ws.close();
+    }
+  };
+  ws.onclose = () => {
+    resolve();
+  };
+  await promise;
+});
+
 Deno.test("Event Handlers order", async () => {
   const { promise, resolve } = Promise.withResolvers<void>();
   const ws = new WebSocket("ws://localhost:4242");
@@ -735,4 +768,102 @@ Deno.test("Close without frame", async () => {
     resolve();
   };
   await promise;
+});
+
+Deno.test("Close connection", async () => {
+  const ac = new AbortController();
+  const listeningDeferred = Promise.withResolvers<void>();
+
+  const server = Deno.serve({
+    handler: (req) => {
+      const { socket, response } = Deno.upgradeWebSocket(req);
+      socket.onmessage = function (e) {
+        socket.close(1008);
+        assertEquals(e.data, "Hello");
+      };
+      socket.onclose = () => {
+        ac.abort();
+      };
+      socket.onerror = () => fail();
+      return response;
+    },
+    signal: ac.signal,
+    onListen: () => listeningDeferred.resolve(),
+    hostname: "localhost",
+    port: servePort,
+  });
+
+  await listeningDeferred.promise;
+
+  const conn = await Deno.connect({ port: servePort, hostname: "localhost" });
+  await conn.write(
+    new TextEncoder().encode(
+      "GET / HTTP/1.1\r\nConnection: Upgrade\r\nUpgrade: websocket\r\nSec-WebSocket-Key: dGhlIHNhbXBsZSBub25jZQ==\r\nSec-WebSocket-Version: 13\r\n\r\n",
+    ),
+  );
+
+  // Write a 2 text frame saying "Hello"
+  await conn.write(new Uint8Array([0x81, 0x05]));
+  await conn.write(new TextEncoder().encode("Hello"));
+
+  // We are a bad client so we won't acknowledge the close frame
+  await conn.write(new Uint8Array([0x81, 0x05]));
+  await conn.write(new TextEncoder().encode("Hello"));
+
+  await server.finished;
+  conn.close();
+});
+
+Deno.test("send to a closed socket", async () => {
+  const { promise, resolve } = Promise.withResolvers<void>();
+  const ws = new WebSocket("ws://localhost:4242");
+  const blob = new Blob(["foo"]);
+  ws.onerror = () => fail();
+  ws.onopen = () => {
+    ws.close();
+    ws.send(blob);
+  };
+  ws.onclose = () => {
+    resolve();
+  };
+  await promise;
+});
+
+// https://github.com/denoland/deno/issues/25126
+Deno.test("websocket close ongoing handshake", async () => {
+  // First try to close without any delay
+  {
+    const { promise, resolve } = Promise.withResolvers<void>();
+    let gotError1 = false;
+    const ws = new WebSocket("ws://localhost:4264");
+    ws.onopen = () => fail();
+    ws.onerror = (e) => {
+      assertEquals((e as ErrorEvent).error.code, "EINTR");
+      gotError1 = true;
+    };
+    ws.onclose = () => resolve();
+    ws.close();
+    await promise;
+    assert(gotError1);
+  }
+
+  await delay(50); // Wait a bit before trying again.
+
+  {
+    const { promise: promise2, resolve: resolve2 } = Promise.withResolvers<
+      void
+    >();
+    const ws2 = new WebSocket("ws://localhost:4264");
+    ws2.onopen = () => fail();
+    let gotError2 = false;
+    ws2.onerror = (e) => {
+      assertEquals((e as ErrorEvent).error.code, "EINTR");
+      gotError2 = true;
+    };
+    ws2.onclose = () => resolve2();
+    await delay(50); // wait a bit this time before calling close
+    ws2.close();
+    await promise2;
+    assert(gotError2);
+  }
 });

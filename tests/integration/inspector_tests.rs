@@ -1,12 +1,12 @@
-// Copyright 2018-2024 the Deno authors. All rights reserved. MIT license.
+// Copyright 2018-2025 the Deno authors. MIT license.
 
+use std::io::BufRead;
+use std::process::ChildStderr;
+use std::time::Duration;
+
+use anyhow::anyhow;
+use anyhow::Error as AnyError;
 use bytes::Bytes;
-use deno_core::anyhow::anyhow;
-use deno_core::error::AnyError;
-use deno_core::serde_json;
-use deno_core::serde_json::json;
-use deno_core::url;
-use deno_fetch::reqwest;
 use fastwebsockets::FragmentCollector;
 use fastwebsockets::Frame;
 use fastwebsockets::WebSocket;
@@ -15,9 +15,7 @@ use hyper::upgrade::Upgraded;
 use hyper::Request;
 use hyper::Response;
 use hyper_util::rt::TokioIo;
-use std::io::BufRead;
-use std::process::ChildStderr;
-use std::time::Duration;
+use serde_json::json;
 use test_util as util;
 use tokio::net::TcpStream;
 use tokio::time::timeout;
@@ -35,7 +33,7 @@ where
   Fut::Output: Send + 'static,
 {
   fn execute(&self, fut: Fut) {
-    deno_core::unsync::spawn(fut);
+    deno_unsync::spawn(fut);
   }
 }
 
@@ -316,7 +314,7 @@ async fn inspector_connect() {
   child.wait().unwrap();
 }
 
-#[tokio::test]
+#[flaky_test::flaky_test(tokio)]
 async fn inspector_break_on_first_line() {
   let script = util::testdata_path().join("inspector/inspector2.js");
   let child = util::deno_cmd()
@@ -499,12 +497,14 @@ async fn inspector_does_not_hang() {
     .send_many(&[
       json!({"id":1,"method":"Runtime.enable"}),
       json!({"id":2,"method":"Debugger.enable"}),
+      json!({"id":3,"method":"Debugger.setBlackboxPatterns","params":{"patterns":["/node_modules/|/bower_components/"]}}),
     ])
     .await;
   tester.assert_received_messages(
       &[
         r#"{"id":1,"result":{}}"#,
-        r#"{"id":2,"result":{"debuggerId":"#
+        r#"{"id":2,"result":{"debuggerId":"#,
+        r#"{"id":3,"result":"#,
       ],
       &[
         r#"{"method":"Runtime.executionContextCreated","params":{"context":{"id":1,"#
@@ -513,21 +513,21 @@ async fn inspector_does_not_hang() {
     .await;
 
   tester
-    .send(json!({"id":3,"method":"Runtime.runIfWaitingForDebugger"}))
+    .send(json!({"id":4,"method":"Runtime.runIfWaitingForDebugger"}))
     .await;
   tester
     .assert_received_messages(
-      &[r#"{"id":3,"result":{}}"#],
+      &[r#"{"id":4,"result":{}}"#],
       &[r#"{"method":"Debugger.paused","#],
     )
     .await;
 
   tester
-    .send(json!({"id":4,"method":"Debugger.resume"}))
+    .send(json!({"id":5,"method":"Debugger.resume"}))
     .await;
   tester
     .assert_received_messages(
-      &[r#"{"id":4,"result":{}}"#],
+      &[r#"{"id":5,"result":{}}"#],
       &[r#"{"method":"Debugger.resumed","params":{}}"#],
     )
     .await;
@@ -740,7 +740,7 @@ async fn inspector_json() {
     }
     let resp = client.execute(req).await.unwrap();
     assert_eq!(resp.status(), reqwest::StatusCode::OK);
-    let endpoint_list: Vec<deno_core::serde_json::Value> =
+    let endpoint_list: Vec<serde_json::Value> =
       serde_json::from_str(&resp.text().await.unwrap()).unwrap();
     let matching_endpoint = endpoint_list.iter().find(|e| {
       e["webSocketDebuggerUrl"]
@@ -773,7 +773,7 @@ async fn inspector_json_list() {
   url.set_path("/json/list");
   let resp = reqwest::get(url).await.unwrap();
   assert_eq!(resp.status(), reqwest::StatusCode::OK);
-  let endpoint_list: Vec<deno_core::serde_json::Value> =
+  let endpoint_list: Vec<serde_json::Value> =
     serde_json::from_str(&resp.text().await.unwrap()).unwrap();
   let matching_endpoint = endpoint_list
     .iter()
@@ -807,7 +807,7 @@ async fn inspector_connect_non_ws() {
   child.wait().unwrap();
 }
 
-#[tokio::test]
+#[flaky_test::flaky_test(tokio)]
 async fn inspector_break_on_first_line_in_test() {
   let script = util::testdata_path().join("inspector/inspector_test.js");
   let child = util::deno_cmd()
@@ -1200,7 +1200,7 @@ async fn inspector_profile() {
 // compatibility layer. Can't reproduce this problem locally for either Mac M1
 // or Linux. Ignoring for now to unblock further integration of "ext/node".
 #[ignore]
-#[tokio::test]
+#[flaky_test::flaky_test(tokio)]
 async fn inspector_break_on_first_line_npm_esm() {
   let context = TestContextBuilder::for_npm().build();
   let child = context
@@ -1267,7 +1267,7 @@ async fn inspector_break_on_first_line_npm_esm() {
 // compatibility layer. Can't reproduce this problem locally for either Mac M1
 // or Linux. Ignoring for now to unblock further integration of "ext/node".
 #[ignore]
-#[tokio::test]
+#[flaky_test::flaky_test(tokio)]
 async fn inspector_break_on_first_line_npm_cjs() {
   let context = TestContextBuilder::for_npm().build();
   let child = context
