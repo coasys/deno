@@ -54,9 +54,9 @@ repository = "https://github.com/denoland/deno"
 
 [workspace.dependencies]
 # deno_ast = { version = "=0.38.2", features = ["transpiling"] }
-# deno_core = { version = "0.283.0", git = "https://github.com/coasys/deno_core.git", branch = "v8-dylib" }
+deno_core = { version = "0.347.0", git = "https://github.com/coasys/deno_core.git", branch = "new-v8-dylib" }
 deno_ast = { version = "=0.46.7", features = ["transpiling"] }
-deno_core = { version = "0.347.0" }
+# deno_core = { version = "0.347.0" }
 
 deno_cache_dir = "=0.20.0"
 deno_config = { version = "=0.54.2", features = ["workspace"] }

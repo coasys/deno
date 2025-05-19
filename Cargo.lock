@@ -1764,8 +1764,7 @@ dependencies = [
 [[package]]
 name = "deno_core"
 version = "0.347.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "d75ae5562f6ad750bc2007e7b1032ae37115a83fe58b6fbc77331c47744956cc"
+source = "git+https://github.com/coasys/deno_core.git?branch=new-v8-dylib#fe93c1fbef3fe9fba34df34968fc1cfcad194fad"
 dependencies = [
  "anyhow",
  "az",
@@ -2407,8 +2406,7 @@ dependencies = [
 [[package]]
 name = "deno_ops"
 version = "0.223.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "c5adc7f0795c7547f1b560a07aaea484e8f9cd035318348c6bfd084e0c42dce8"
+source = "git+https://github.com/coasys/deno_core.git?branch=new-v8-dylib#fe93c1fbef3fe9fba34df34968fc1cfcad194fad"
 dependencies = [
  "indexmap 2.8.0",
  "proc-macro-rules",
@@ -5192,7 +5190,7 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "4979f22fdb869068da03c9f7528f8297c6fd2606bc3a4affe42e6a823fdb8da4"
 dependencies = [
  "cfg-if",
- "windows-targets 0.52.6",
+ "windows-targets 0.48.5",
 ]
 
 [[package]]
@@ -7443,8 +7441,7 @@ dependencies = [
 [[package]]
 name = "serde_v8"
 version = "0.256.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "69d69b4e574a9ec6bd0222463e50cf8531986d9c657543888e029d54d909b283"
+source = "git+https://github.com/coasys/deno_core.git?branch=new-v8-dylib#fe93c1fbef3fe9fba34df34968fc1cfcad194fad"
 dependencies = [
  "deno_error",
  "num-bigint",
@@ -9231,8 +9228,7 @@ dependencies = [
 [[package]]
 name = "v8"
 version = "137.1.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "be127b878f582d3b7602bd2e26a39f90a95b388deb940da7f6554617aedcdf40"
+source = "git+https://github.com/coasys/rusty_v8.git?branch=v0.137.1-abseil-namespaced#ca442fc6341ffe2063137b22b4fd6a0237b3cb6f"
 dependencies = [
  "bindgen 0.71.1",
  "bitflags 2.8.0",
