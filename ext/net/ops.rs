@@ -949,7 +949,7 @@ where
     }
   }
 
-  let resolver = hickory_resolver::Resolver::tokio(config, opts);
+  let resolver = hickory_resolver::TokioAsyncResolver::tokio(config, opts);
 
   let lookup_fut = resolver.lookup(query, record_type);
 
@@ -978,17 +978,17 @@ where
   lookup
     .map_err(|e| match e.kind() {
       ResolveErrorKind::Proto(ProtoError { kind, .. })
-        if matches!(**kind, ProtoErrorKind::NoRecordsFound { .. }) =>
+        if matches!(*kind, ProtoErrorKind::NoRecordsFound { .. }) =>
       {
         NetError::DnsNotFound(e)
       }
       ResolveErrorKind::Proto(ProtoError { kind, .. })
-        if matches!(**kind, ProtoErrorKind::NoConnections { .. }) =>
+        if matches!(*kind, ProtoErrorKind::NoConnections { .. }) =>
       {
         NetError::DnsNotConnected(e)
       }
       ResolveErrorKind::Proto(ProtoError { kind, .. })
-        if matches!(**kind, ProtoErrorKind::Timeout { .. }) =>
+        if matches!(*kind, ProtoErrorKind::Timeout { .. }) =>
       {
         NetError::DnsTimedOut(e)
       }
