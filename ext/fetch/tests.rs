@@ -40,10 +40,12 @@ fn test_userspace_resolver() {
     // use `localhost` to ensure dns step happens.
     let addr = format!("localhost:{}", src_addr.port());
 
-    let hickory = hickory_resolver::Resolver::tokio(
+    let hickory = hickory_resolver::Resolver::builder_with_config(
       Default::default(),
-      Default::default(),
-    );
+      hickory_resolver::name_server::TokioConnectionProvider::default(),
+    )
+    .with_options(Default::default())
+    .build();
 
     assert_eq!(thread_counter.load(SeqCst), 0);
     rust_test_client_with_resolver(

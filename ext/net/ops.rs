@@ -27,6 +27,7 @@ use hickory_proto::ProtoErrorKind;
 use hickory_resolver::config::NameServerConfigGroup;
 use hickory_resolver::config::ResolverConfig;
 use hickory_resolver::config::ResolverOpts;
+use hickory_resolver::name_server::TokioConnectionProvider;
 use hickory_resolver::system_conf;
 use hickory_resolver::ResolveError;
 use hickory_resolver::ResolveErrorKind;
@@ -949,7 +950,12 @@ where
     }
   }
 
-  let resolver = hickory_resolver::TokioAsyncResolver::tokio(config, opts);
+  let resolver = hickory_resolver::Resolver::builder_with_config(
+    config,
+    TokioConnectionProvider::default(),
+  )
+  .with_options(opts)
+  .build();
 
   let lookup_fut = resolver.lookup(query, record_type);
 
@@ -978,17 +984,17 @@ where
   lookup
     .map_err(|e| match e.kind() {
       ResolveErrorKind::Proto(ProtoError { kind, .. })
-        if matches!(*kind, ProtoErrorKind::NoRecordsFound { .. }) =>
+        if matches!(**kind, ProtoErrorKind::NoRecordsFound { .. }) =>
       {
         NetError::DnsNotFound(e)
       }
       ResolveErrorKind::Proto(ProtoError { kind, .. })
-        if matches!(*kind, ProtoErrorKind::NoConnections { .. }) =>
+        if matches!(**kind, ProtoErrorKind::NoConnections { .. }) =>
       {
         NetError::DnsNotConnected(e)
       }
       ResolveErrorKind::Proto(ProtoError { kind, .. })
-        if matches!(*kind, ProtoErrorKind::Timeout { .. }) =>
+        if matches!(**kind, ProtoErrorKind::Timeout { .. }) =>
       {
         NetError::DnsTimedOut(e)
       }
