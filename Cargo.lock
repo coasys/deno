@@ -1759,7 +1759,7 @@ dependencies = [
 [[package]]
 name = "deno_core"
 version = "0.347.0"
-source = "git+https://github.com/coasys/deno_core.git?branch=new-v8-dylib#fe93c1fbef3fe9fba34df34968fc1cfcad194fad"
+source = "git+https://github.com/coasys/deno_core.git?branch=new-v8-dylib#f685c89dd2929da2e1001b006a8e4ff8b09b1bf3"
 dependencies = [
  "anyhow",
  "az",
@@ -2401,7 +2401,7 @@ dependencies = [
 [[package]]
 name = "deno_ops"
 version = "0.223.0"
-source = "git+https://github.com/coasys/deno_core.git?branch=new-v8-dylib#fe93c1fbef3fe9fba34df34968fc1cfcad194fad"
+source = "git+https://github.com/coasys/deno_core.git?branch=new-v8-dylib#f685c89dd2929da2e1001b006a8e4ff8b09b1bf3"
 dependencies = [
  "indexmap 2.8.0",
  "proc-macro-rules",
@@ -7487,7 +7487,7 @@ dependencies = [
 [[package]]
 name = "serde_v8"
 version = "0.256.0"
-source = "git+https://github.com/coasys/deno_core.git?branch=new-v8-dylib#fe93c1fbef3fe9fba34df34968fc1cfcad194fad"
+source = "git+https://github.com/coasys/deno_core.git?branch=new-v8-dylib#f685c89dd2929da2e1001b006a8e4ff8b09b1bf3"
 dependencies = [
  "deno_error",
  "num-bigint",
@@ -9274,7 +9274,7 @@ dependencies = [
 [[package]]
 name = "v8"
 version = "137.1.0"
-source = "git+https://github.com/coasys/rusty_v8.git?branch=v0.137.1-abseil-namespaced#ca442fc6341ffe2063137b22b4fd6a0237b3cb6f"
+source = "git+https://github.com/coasys/rusty_v8.git?tag=v137.1.0#c302ece8ab991ce125d29acdacb623a39585b581"
 dependencies = [
  "bindgen 0.71.1",
  "bitflags 2.8.0",
