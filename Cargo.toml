@@ -44,7 +44,7 @@ members = [
   "tests/sqlite_extension_test",
   "tests/util/server",
 ]
-exclude = ["tests/util/std/hash/_wasm"]
+exclude = ["tests/util/std/hash/_wasm", "patches/swc_common", "patches/ast_node", "patches/swc_config"]
 
 [workspace.package]
 authors = ["the Deno authors"]
@@ -551,3 +551,8 @@ opt-level = 3
 opt-level = 3
 [profile.release.package.deno_npm_cache]
 opt-level = 3
+
+[patch.crates-io]
+swc_common = { path = "patches/swc_common" }
+ast_node = { path = "patches/ast_node" }
+swc_config = { path = "patches/swc_config" }
