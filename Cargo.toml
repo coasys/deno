@@ -394,7 +394,11 @@ unicode-general-category = "1.1.0"
 unicode-normalization = "0.1"
 unicode-width = "0.1.3"
 yaml_parser = "=0.2.1"
-zstd = "=0.13.2"
+# coasys: loosened from `=0.13.2` exact-pin to `0.13` (accepts 0.13.2 AND
+# 0.13.3). Without this, cargo cannot resolve the AD4M workspace because
+# coasys/holochain 0.7.0's holochain_metrics pulls zip 8.6.0 which requires
+# zstd ^0.13.3, and deno's =0.13.2 exact-pin blocks it.
+zstd = "0.13"
 
 # crypto
 aead-gcm-stream = "0.4"
