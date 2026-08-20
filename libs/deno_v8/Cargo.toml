@@ -37,5 +37,9 @@ v8_enable_v8_checks = [
 ]
 
 [dependencies]
-rusty_v8 = { package = "v8", version = "150.4.0", optional = true, default-features = false }
+# coasys: point at our rusty_v8 fork carrying the abseil-namespace patch
+# (denoland/rusty_v8#1844 still open upstream). Pre-built binaries are
+# published to https://github.com/coasys/rusty_v8/releases by our
+# coasys-release.yml workflow on this tag.
+rusty_v8 = { package = "v8", version = "150.4.0", optional = true, default-features = false, git = "https://github.com/coasys/rusty_v8.git", tag = "v150.4.0-coasys" }
 v8x_backend = { package = "v8x", version = "=149.4.0-rc.4", optional = true, default-features = false }
