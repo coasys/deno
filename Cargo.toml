@@ -107,14 +107,13 @@ deno_task_shell = "=0.33.3"
 deno_terminal = "=0.2.3"
 deno_unsync = { version = "0.4.4", default-features = false }
 deno_whoami = "0.1.0"
-# coasys: dropped simdutf, kept v8. Explicit `features = ["v8"]` because we
-# also set `default-features = false` to avoid the upstream default which
-# implicitly includes simdutf's transitive chain (upstream had `default = ["v8", "simdutf"]`
-# implicitly — being explicit here so downstream crates that inherit this
-# workspace alias via `deno_v8 = { workspace = true }` get the v8 backend
-# selected without simdutf. Our coasys-release CI publishes only the plain
-# `src_binding_release_*.rs` variant, not `src_binding_simdutf_release_*.rs`.
-v8 = { package = "deno_v8", version = "0.2.0", path = "./libs/deno_v8", default-features = false, features = ["v8"] }
+# coasys: keep simdutf on — deno_core's own ops_builtin_v8.rs calls
+# `v8::simdutf::validate_ascii()` unconditionally, so simdutf is required
+# to compile deno_core. The rusty_v8 prebuilt-binary download for simdutf
+# needs to be made available separately (either extend coasys-release.yml
+# to publish `src_binding_simdutf_release_*.rs`, or set V8_FROM_SOURCE=1
+# to compile V8 locally).
+v8 = { package = "deno_v8", version = "0.2.0", path = "./libs/deno_v8", default-features = false, features = ["v8", "simdutf"] }
 
 denokv_proto = "0.14.0"
 denokv_remote = "0.14.0"
