@@ -1,4 +1,4 @@
-// Copyright 2018-2025 the Deno authors. MIT license.
+// Copyright 2018-2026 the Deno authors. MIT license.
 import { assert, assertEquals, assertStringIncludes } from "./test_util.ts";
 import { concat } from "@std/bytes/concat";
 
@@ -92,6 +92,21 @@ Deno.test(async function blobStream() {
   await read();
   const decoder = new TextDecoder();
   assertEquals(decoder.decode(bytes), "Hello World");
+});
+
+Deno.test(async function blobTextStream() {
+  const text = "Hello 👋 wörld";
+  const blob = new Blob([text]);
+  const stream = blob.textStream();
+  assert(stream instanceof ReadableStream);
+  const reader = stream.getReader();
+  let result = "";
+  while (true) {
+    const { done, value } = await reader.read();
+    if (done) break;
+    result += value;
+  }
+  assertEquals(result, text);
 });
 
 Deno.test(async function blobArrayBuffer() {

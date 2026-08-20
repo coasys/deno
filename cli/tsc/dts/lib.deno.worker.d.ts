@@ -1,4 +1,4 @@
-// Copyright 2018-2025 the Deno authors. MIT license.
+// Copyright 2018-2026 the Deno authors. MIT license.
 
 /// <reference no-default-lib="true" />
 /// <reference lib="deno.ns" />
@@ -123,6 +123,9 @@ declare interface WorkerNavigator {
   /** Returns the number of logical processors available to run threads on the user's computer. */
   readonly hardwareConcurrency: number;
 
+  /** Returns a string identifying the platform on which the user's browser is running. */
+  readonly platform: string;
+
   /** Returns the user agent string for the current browser. */
   readonly userAgent: string;
 
@@ -131,6 +134,9 @@ declare interface WorkerNavigator {
 
   /** Returns an array of strings representing the languages known to the user. */
   readonly languages: string[];
+
+  /** Returns a {@linkcode NavigatorUAData} object with information about the runtime's user agent. */
+  readonly userAgentData: NavigatorUAData;
 }
 
 /**

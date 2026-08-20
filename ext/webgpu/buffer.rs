@@ -1,19 +1,20 @@
-// Copyright 2018-2025 the Deno authors. MIT license.
+// Copyright 2018-2026 the Deno authors. MIT license.
 
 use std::cell::RefCell;
 use std::rc::Rc;
 use std::time::Duration;
 
+use deno_core::GarbageCollected;
+use deno_core::WebIDL;
 use deno_core::futures::channel::oneshot;
 use deno_core::op2;
 use deno_core::v8;
 use deno_core::webidl::WebIdlInterfaceConverter;
-use deno_core::GarbageCollected;
-use deno_core::WebIDL;
 use deno_error::JsErrorBox;
 use wgpu_core::device::HostMap as MapMode;
 
 use crate::Instance;
+use crate::error::GPUGenericError;
 
 #[derive(WebIDL)]
 #[webidl(dictionary)]
@@ -59,7 +60,14 @@ pub struct GPUBuffer {
   pub map_state: RefCell<&'static str>,
   pub map_mode: RefCell<Option<MapMode>>,
 
-  pub mapped_js_buffers: RefCell<Vec<v8::Global<v8::ArrayBuffer>>>,
+  pub mapped_js_buffers: RefCell<Vec<MappedJsBuffer>>,
+}
+
+pub struct MappedJsBuffer {
+  pub buffer: v8::Global<v8::ArrayBuffer>,
+  pub offset: u64,
+  pub size: u64,
+  pub copy_on_unmap: bool,
 }
 
 impl Drop for GPUBuffer {
@@ -68,11 +76,71 @@ impl Drop for GPUBuffer {
   }
 }
 
+impl GPUBuffer {
+  fn detach_mapped_js_buffers(&self, scope: &mut v8::PinScope<'_, '_>) {
+    for mapped in self.mapped_js_buffers.replace(vec![]) {
+      let ab = mapped.buffer.open(scope);
+      ab.detach(None);
+    }
+  }
+
+  fn writeback_and_detach_mapped_js_buffers(
+    &self,
+    scope: &mut v8::PinScope<'_, '_>,
+  ) -> Result<(), BufferError> {
+    let mut first_error = None;
+    for mapped in self.mapped_js_buffers.replace(vec![]) {
+      let ab = mapped.buffer.open(scope);
+      // A zero `byte_length` means the range is already detached, which can
+      // only happen if the caller detached it themselves (e.g. by transferring
+      // it to a worker). There is nothing left to read from, so the range is
+      // skipped: any writes made through a transferred copy are not propagated
+      // to the buffer. That matches the mapping model, where the range handed
+      // out by `getMappedRange()` is the only view that stays valid until
+      // `unmap()`.
+      if mapped.copy_on_unmap && mapped.size != 0 && ab.byte_length() != 0 {
+        match self.instance.buffer_get_mapped_range(
+          self.id,
+          mapped.offset,
+          Some(mapped.size),
+        ) {
+          Ok((dst, _)) => {
+            if let Some(src) = ab.data() {
+              // SAFETY: `src` points to this V8-owned ArrayBuffer's backing
+              // store, and `dst`/`mapped.size` were revalidated by wgpu for
+              // the currently mapped range.
+              unsafe {
+                std::ptr::copy_nonoverlapping(
+                  src.as_ptr() as *const u8,
+                  dst.as_ptr(),
+                  mapped.size as usize,
+                );
+              }
+            }
+          }
+          Err(err) => {
+            first_error.get_or_insert(BufferError::Access(err));
+          }
+        }
+      }
+      ab.detach(None);
+    }
+
+    if let Some(err) = first_error {
+      return Err(err);
+    }
+    Ok(())
+  }
+}
+
 impl WebIdlInterfaceConverter for GPUBuffer {
   const NAME: &'static str = "GPUBuffer";
 }
 
-impl GarbageCollected for GPUBuffer {
+// SAFETY: we're sure this can be GCed
+unsafe impl GarbageCollected for GPUBuffer {
+  fn trace(&self, _visitor: &mut deno_core::v8::cppgc::Visitor) {}
+
   fn get_name(&self) -> &'static std::ffi::CStr {
     c"GPUBuffer"
   }
@@ -80,6 +148,12 @@ impl GarbageCollected for GPUBuffer {
 
 #[op2]
 impl GPUBuffer {
+  #[constructor]
+  #[cppgc]
+  fn constructor(_: bool) -> Result<GPUBuffer, GPUGenericError> {
+    Err(GPUGenericError::InvalidConstructor)
+  }
+
   #[getter]
   #[string]
   fn label(&self) -> String {
@@ -107,7 +181,9 @@ impl GPUBuffer {
     *self.map_state.borrow()
   }
 
-  #[async_method]
+  // In the successful case, the promise should resolve to undefined, but
+  // `#[undefined]` does not seem to work here.
+  // https://github.com/denoland/deno/issues/29603
   async fn map_async(
     &self,
     #[webidl(options(enforce_range = true))] mode: u32,
@@ -167,7 +243,7 @@ impl GPUBuffer {
         {
           self
             .instance
-            .device_poll(self.device, wgpu_types::Maintain::wait())
+            .device_poll(self.device, wgpu_types::PollType::wait_indefinitely())
             .unwrap();
         }
         tokio::time::sleep(Duration::from_millis(10)).await;
@@ -192,7 +268,7 @@ impl GPUBuffer {
 
   fn get_mapped_range<'s>(
     &self,
-    scope: &mut v8::HandleScope<'s>,
+    scope: &mut v8::PinScope<'s, '_>,
     #[webidl(default = 0)] offset: u64,
     #[webidl] size: Option<u64>,
   ) -> Result<v8::Local<'s, v8::ArrayBuffer>, BufferError> {
@@ -204,50 +280,37 @@ impl GPUBuffer {
     let mode = self.map_mode.borrow();
     let mode = mode.as_ref().unwrap();
 
-    let bs = if mode == &MapMode::Write {
-      unsafe extern "C" fn noop_deleter_callback(
-        _data: *mut std::ffi::c_void,
-        _byte_length: usize,
-        _deleter_data: *mut std::ffi::c_void,
-      ) {
-      }
-
-      // SAFETY: creating a backing store from the pointer and length provided by wgpu
-      unsafe {
-        v8::ArrayBuffer::new_backing_store_from_ptr(
-          slice_pointer.as_ptr() as _,
-          range_size as usize,
-          noop_deleter_callback,
-          std::ptr::null_mut(),
-        )
-      }
-    } else {
-      // SAFETY: creating a vector from the pointer and length provided by wgpu
-      let slice = unsafe {
-        std::slice::from_raw_parts(slice_pointer.as_ptr(), range_size as usize)
-      };
-      v8::ArrayBuffer::new_backing_store_from_vec(slice.to_vec())
+    // SAFETY: creating a slice from the pointer and length provided by wgpu.
+    // Copy into a V8-owned backing store so a later GPUBuffer.destroy(), drop,
+    // or backend unmap cannot leave JS holding a pointer to freed native memory.
+    let slice = unsafe {
+      std::slice::from_raw_parts(slice_pointer.as_ptr(), range_size as usize)
     };
+    let bs = v8::ArrayBuffer::new_backing_store_from_vec(slice.to_vec());
 
     let shared_bs = bs.make_shared();
     let ab = v8::ArrayBuffer::with_backing_store(scope, &shared_bs);
 
-    if mode == &MapMode::Write {
-      self
-        .mapped_js_buffers
-        .borrow_mut()
-        .push(v8::Global::new(scope, ab));
-    }
+    self.mapped_js_buffers.borrow_mut().push(MappedJsBuffer {
+      buffer: v8::Global::new(scope, ab),
+      offset,
+      size: range_size,
+      copy_on_unmap: mode == &MapMode::Write,
+    });
 
     Ok(ab)
   }
 
   #[nofast]
-  fn unmap(&self, scope: &mut v8::HandleScope) -> Result<(), BufferError> {
-    for ab in self.mapped_js_buffers.replace(vec![]) {
-      let ab = ab.open(scope);
-      ab.detach(None);
-    }
+  #[undefined]
+  fn unmap(&self, scope: &mut v8::PinScope<'_, '_>) -> Result<(), BufferError> {
+    // Writeback has to happen while the backend mapping is still live, so it
+    // runs before `buffer_unmap()`. If it fails we bail out and leave
+    // `map_state` as "mapped", matching the previous behavior where a failing
+    // `buffer_unmap()` left the state untouched. In practice this is
+    // unreachable: the range was validated by `getMappedRange()` and the
+    // mapping is still active here.
+    self.writeback_and_detach_mapped_js_buffers(scope)?;
 
     self
       .instance
@@ -259,11 +322,10 @@ impl GPUBuffer {
     Ok(())
   }
 
-  #[fast]
-  fn destroy(&self) -> Result<(), JsErrorBox> {
-    self
-      .instance
-      .buffer_destroy(self.id)
-      .map_err(|e| JsErrorBox::generic(e.to_string()))
+  #[nofast]
+  #[undefined]
+  fn destroy(&self, scope: &mut v8::PinScope<'_, '_>) {
+    self.detach_mapped_js_buffers(scope);
+    self.instance.buffer_destroy(self.id);
   }
 }

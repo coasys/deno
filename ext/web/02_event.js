@@ -1,11 +1,12 @@
-// Copyright 2018-2025 the Deno authors. MIT license.
+// Copyright 2018-2026 the Deno authors. MIT license.
 
 // This module follows most of the WHATWG Living Standard for the DOM logic.
 // Many parts of the DOM are not implemented in Deno, but the logic for those
 // parts still exists.  This means you will observe a lot of strange structures
 // and impossible logic branches based on what Deno currently supports.
 
-import { core, primordials } from "ext:core/mod.js";
+(function () {
+const { core, internals, primordials } = __bootstrap;
 const {
   ArrayPrototypeIncludes,
   ArrayPrototypeIndexOf,
@@ -17,25 +18,42 @@ const {
   Boolean,
   Error,
   FunctionPrototypeCall,
+  JSONStringify,
   MapPrototypeGet,
   MapPrototypeSet,
   ObjectCreate,
   ObjectDefineProperty,
+  ObjectFreeze,
   ObjectGetOwnPropertyDescriptor,
+  ObjectGetPrototypeOf,
+  ObjectPrototype,
   ObjectPrototypeIsPrototypeOf,
   ReflectDefineProperty,
   SafeArrayIterator,
   SafeMap,
+  String,
   StringPrototypeStartsWith,
   Symbol,
   SymbolFor,
+  SymbolIterator,
   SymbolToStringTag,
   TypeError,
 } = primordials;
 
-import * as webidl from "ext:deno_webidl/00_webidl.js";
-import { DOMException } from "./01_dom_exception.js";
-import { createFilteredInspectProxy } from "ext:deno_console/01_console.js";
+const webidl = core.loadExtScript("ext:deno_webidl/00_webidl.js");
+const { DOMException } = core.loadExtScript("ext:deno_web/01_dom_exception.js");
+
+// Lazy-load createFilteredInspectProxy from console to avoid
+// circular dependency at load time. Only needed for custom inspect.
+let _createFilteredInspectProxy;
+function getCreateFilteredInspectProxy() {
+  if (!_createFilteredInspectProxy) {
+    _createFilteredInspectProxy = core.loadExtScript(
+      "ext:deno_web/01_console.js",
+    ).createFilteredInspectProxy;
+  }
+  return _createFilteredInspectProxy;
+}
 
 // This should be set via setGlobalThis this is required so that if even
 // user deletes globalThis it is still usable
@@ -123,8 +141,6 @@ const _path = Symbol("[[path]]");
 
 class Event {
   constructor(type, eventInitDict = { __proto__: null }) {
-    // TODO(lucacasonato): remove when this interface is spec aligned
-    this[SymbolToStringTag] = "Event";
     this[_canceledFlag] = false;
     this[_stopPropagationFlag] = false;
     this[_stopImmediatePropagationFlag] = false;
@@ -158,7 +174,7 @@ class Event {
 
   [SymbolFor("Deno.privateCustomInspect")](inspect, inspectOptions) {
     return inspect(
-      createFilteredInspectProxy({
+      getCreateFilteredInspectProxy()({
         object: this,
         evaluate: ObjectPrototypeIsPrototypeOf(EventPrototype, this),
         keys: EVENT_PROPS,
@@ -308,22 +324,6 @@ class Event {
     return Event.BUBBLING_PHASE;
   }
 
-  static get NONE() {
-    return 0;
-  }
-
-  static get CAPTURING_PHASE() {
-    return 1;
-  }
-
-  static get AT_TARGET() {
-    return 2;
-  }
-
-  static get BUBBLING_PHASE() {
-    return 3;
-  }
-
   get eventPhase() {
     return this[_attributes].eventPhase;
   }
@@ -359,7 +359,9 @@ class Event {
 
   set returnValue(value) {
     if (!webidl.converters.boolean(value)) {
-      this[_canceledFlag] = true;
+      if (this[_attributes].cancelable && !this[_inPassiveListener]) {
+        this[_canceledFlag] = true;
+      }
     }
   }
 
@@ -386,7 +388,47 @@ class Event {
   }
 }
 
+ObjectDefineProperty(Event, "NONE", {
+  __proto__: null,
+  value: 0,
+  writable: false,
+  enumerable: true,
+  configurable: false,
+});
+
+ObjectDefineProperty(Event, "CAPTURING_PHASE", {
+  __proto__: null,
+  value: 1,
+  writable: false,
+  enumerable: true,
+  configurable: false,
+});
+
+ObjectDefineProperty(Event, "AT_TARGET", {
+  __proto__: null,
+  value: 2,
+  writable: false,
+  enumerable: true,
+  configurable: false,
+});
+
+ObjectDefineProperty(Event, "BUBBLING_PHASE", {
+  __proto__: null,
+  value: 3,
+  writable: false,
+  enumerable: true,
+  configurable: false,
+});
+
 const EventPrototype = Event.prototype;
+
+ObjectDefineProperty(EventPrototype, SymbolToStringTag, {
+  __proto__: null,
+  value: "Event",
+  writable: false,
+  enumerable: false,
+  configurable: true,
+});
 
 // Not spec compliant. The spec defines it as [LegacyUnforgeable]
 // but doing so has a big performance hit
@@ -712,6 +754,13 @@ function innerInvokeEventListeners(
   for (let i = 0; i < handlersLength; i++) {
     const listener = handlers[i];
 
+    if (
+      getStopImmediatePropagation(eventImpl) &&
+      !listener.options[kResistStopImmediatePropagation]
+    ) {
+      continue;
+    }
+
     let capture, once, passive;
     if (typeof listener.options === "boolean") {
       capture = listener.options;
@@ -749,23 +798,23 @@ function innerInvokeEventListeners(
       setInPassiveListener(eventImpl, true);
     }
 
-    if (typeof listener.callback === "object") {
-      if (typeof listener.callback.handleEvent === "function") {
-        listener.callback.handleEvent(eventImpl);
+    try {
+      if (typeof listener.callback === "object") {
+        if (typeof listener.callback.handleEvent === "function") {
+          listener.callback.handleEvent(eventImpl);
+        }
+      } else {
+        FunctionPrototypeCall(
+          listener.callback,
+          eventImpl.currentTarget,
+          eventImpl,
+        );
       }
-    } else {
-      FunctionPrototypeCall(
-        listener.callback,
-        eventImpl.currentTarget,
-        eventImpl,
-      );
+    } catch (error) {
+      reportException(error);
     }
 
     setInPassiveListener(eventImpl, false);
-
-    if (getStopImmediatePropagation(eventImpl)) {
-      return found;
-    }
   }
 
   return found;
@@ -807,15 +856,21 @@ function invokeEventListeners(tuple, eventImpl) {
   }
 }
 
+// https://dom.spec.whatwg.org/#dom-eventtarget-removeeventlistener
 function normalizeEventHandlerOptions(
   options,
 ) {
-  if (typeof options === "boolean" || typeof options === "undefined") {
+  if (
+    typeof options === "boolean" || typeof options === "undefined" ||
+    options === null
+  ) {
     return {
       capture: Boolean(options),
     };
   } else {
-    return options;
+    return {
+      capture: Boolean(options.capture),
+    };
   }
 }
 
@@ -846,6 +901,9 @@ function retarget(a, b) {
 // Accessors for non-public data
 
 const eventTargetData = Symbol();
+const kResistStopImmediatePropagation = Symbol(
+  "kResistStopImmediatePropagation",
+);
 
 function setEventTargetData(target) {
   target[eventTargetData] = getDefaultTargetData();
@@ -894,6 +952,10 @@ function addEventListenerOptionsConverter(V, prefix) {
     capture: !!V.capture,
     once: !!V.once,
     passive: !!V.passive,
+    // This field exists for simulating Node.js behavior, implemented in https://github.com/nodejs/node/commit/bcd35c334ec75402ee081f1c4da128c339f70c24
+    // Some internal event listeners in Node.js can ignore `e.stopImmediatePropagation()` calls
+    // from the earlier event listeners.
+    [kResistStopImmediatePropagation]: !!V[kResistStopImmediatePropagation],
   };
 
   const signal = V.signal;
@@ -910,7 +972,11 @@ function addEventListenerOptionsConverter(V, prefix) {
 
 class EventTarget {
   constructor() {
-    this[eventTargetData] = getDefaultTargetData();
+    // eventTargetData is allocated lazily on first addEventListener (or via
+    // setEventTargetData for objects built with webidl.createBranded). Most
+    // short-lived EventTarget instances created on the request/response hot
+    // path (AbortSignal, transient streams) never have a listener attached
+    // and never need the listeners map / 5-field default object.
     this[webidl.brand] = webidl.brand;
   }
 
@@ -931,7 +997,11 @@ class EventTarget {
       return;
     }
 
-    const { listeners } = self[eventTargetData];
+    let data = self[eventTargetData];
+    if (data === undefined) {
+      data = self[eventTargetData] = getDefaultTargetData();
+    }
+    const { listeners } = data;
 
     if (!listeners[type]) {
       listeners[type] = [];
@@ -980,10 +1050,11 @@ class EventTarget {
       "Failed to execute 'removeEventListener' on 'EventTarget'",
     );
 
-    const { listeners } = self[eventTargetData];
-    if (callback === null || !listeners[type]) {
+    const data = self[eventTargetData];
+    if (data === undefined || callback === null || !data.listeners[type]) {
       return;
     }
+    const { listeners } = data;
 
     options = normalizeEventHandlerOptions(options);
 
@@ -1024,8 +1095,8 @@ class EventTarget {
       globalThis_[SymbolFor("Deno.isUnloadDispatched")] = true;
     }
 
-    const { listeners } = self[eventTargetData];
-    if (!listeners[event.type]) {
+    const data = self[eventTargetData];
+    if (data === undefined || !data.listeners[event.type]) {
       setTarget(event, this);
       return true;
     }
@@ -1110,7 +1181,7 @@ class ErrorEvent extends Event {
 
   [SymbolFor("Deno.privateCustomInspect")](inspect, inspectOptions) {
     return inspect(
-      createFilteredInspectProxy({
+      getCreateFilteredInspectProxy()({
         object: this,
         evaluate: ObjectPrototypeIsPrototypeOf(ErrorEventPrototype, this),
         keys: [
@@ -1176,7 +1247,7 @@ class CloseEvent extends Event {
 
   [SymbolFor("Deno.privateCustomInspect")](inspect, inspectOptions) {
     return inspect(
-      createFilteredInspectProxy({
+      getCreateFilteredInspectProxy()({
         object: this,
         evaluate: ObjectPrototypeIsPrototypeOf(CloseEventPrototype, this),
         keys: [
@@ -1193,9 +1264,48 @@ class CloseEvent extends Event {
 
 const CloseEventPrototype = CloseEvent.prototype;
 
+// Lazy reference to MessagePort.prototype - 13_message_port.js depends on
+// this module, so the script can't be loaded at definition time without
+// causing a load cycle. Cached on first access.
+let _MessagePortPrototype;
+function getMessagePortPrototype() {
+  if (_MessagePortPrototype === undefined) {
+    _MessagePortPrototype =
+      core.loadExtScript("ext:deno_web/13_message_port.js")
+        .MessagePortPrototype;
+  }
+  return _MessagePortPrototype;
+}
+
+// Format an arbitrary JS value for inclusion in a MessageEvent constructor
+// error message *for the "must be MessagePort" check*: strings and primitives
+// get JSON-quoted (`"null"`, `"1"`, `"{}"`), matching the regex assertions
+// Node's tests use for source/ports[i].
+function formatForBranded(value) {
+  if (value === null) return '"null"';
+  if (value === undefined) return '"undefined"';
+  const t = typeof value;
+  if (t === "string") return JSONStringify(value);
+  if (t === "object" || t === "function") return '"{}"';
+  return JSONStringify(String(value));
+}
+
+// Format for the iterable-check error: the raw value's string representation,
+// unquoted. Node's test expects `eventInitDict.ports (0) is not iterable.`
+function formatForRaw(value) {
+  if (value === null) return "null";
+  if (value === undefined) return "undefined";
+  const t = typeof value;
+  if (t === "string") return JSONStringify(value);
+  if (t === "object" || t === "function") return "{}";
+  return String(value);
+}
+
 class MessageEvent extends Event {
+  #source = null;
+
   get source() {
-    return null;
+    return this.#source;
   }
 
   constructor(type, eventInitDict) {
@@ -1206,14 +1316,95 @@ class MessageEvent extends Event {
     });
 
     this.data = eventInitDict?.data ?? null;
-    this.ports = eventInitDict?.ports ?? [];
-    this.origin = eventInitDict?.origin ?? "";
-    this.lastEventId = eventInitDict?.lastEventId ?? "";
+    const ports = eventInitDict?.ports;
+    if (ports == null) {
+      // `ports` is a FrozenArray<MessagePort> per the HTML spec, so the
+      // exposed array must be read-only.
+      this.ports = ObjectFreeze([]);
+    } else {
+      // MessageEvent ports: iterable validation + per-element MessagePort
+      // type check. Matches the messages Node asserts on so the
+      // node_compat tests pass while still being WHATWG-shaped.
+      if (
+        ports === null || typeof ports !== "object" ||
+        ports[SymbolIterator] === undefined
+      ) {
+        throw new TypeError(
+          `MessageEvent constructor: eventInitDict.ports (${
+            formatForRaw(ports)
+          }) is not iterable.`,
+        );
+      }
+      const MessagePortProto = getMessagePortPrototype();
+      const arr = [];
+      let i = 0;
+      // Iterate using the user's own iterator so values that aren't real
+      // arrays (e.g. a `RegExp` with a custom `Symbol.iterator` -- covered
+      // by WPT's no-regexp-special-casing test) still produce the
+      // expected `ports` array. SafeArrayIterator can't be used here
+      // because it walks the value as if it were an Array.
+      // deno-lint-ignore deno-internal/prefer-primordials
+      for (const p of ports) {
+        if (
+          p === null || typeof p !== "object" ||
+          !ObjectPrototypeIsPrototypeOf(MessagePortProto, p)
+        ) {
+          throw new TypeError(
+            `MessageEvent constructor: Expected eventInitDict.ports[${i}] (${
+              formatForBranded(p)
+            }) to be an instance of MessagePort.`,
+          );
+        }
+        arr[i++] = p;
+      }
+      // `ports` is a FrozenArray<MessagePort> per the HTML spec.
+      this.ports = ObjectFreeze(arr);
+    }
+    // origin and lastEventId are USVString per spec, so coerce to string
+    // (Node's test passes numbers and expects string coercion).
+    this.origin = eventInitDict?.origin === undefined
+      ? ""
+      : String(eventInitDict.origin);
+    this.lastEventId = eventInitDict?.lastEventId === undefined
+      ? ""
+      : String(eventInitDict.lastEventId);
+    const source = eventInitDict?.source;
+    if (source != null) {
+      // The Web spec types source as `MessageEventSource = MessagePort |
+      // ServiceWorker | WindowProxy`. We don't have a JS-level Window or
+      // ServiceWorker brand to gate against, so accept anything except
+      // primitives (which the node_compat tests expect to throw on,
+      // e.g. `source: 1`) and plain `Object` instances like `{}` (also
+      // checked by Node). MessagePort, Window-like globals, and
+      // user-defined classes all pass through unchanged -- matching both
+      // the WPT `messageevent-constructor.https.html` test (which
+      // assigns `window` to `source`) and node_compat
+      // `test-worker-message-event`.
+      const t = typeof source;
+      const isPrimitive = t !== "object" && t !== "function";
+      // Treat values whose prototype is exactly Object.prototype (i.e.
+      // plain object literals like `{}`) as invalid sources. Using the
+      // prototype chain rather than `.constructor` avoids the
+      // prefer-primordials lint and is more reliable since user code
+      // can override `constructor`.
+      const isPlainObject = !isPrimitive &&
+        ObjectGetPrototypeOf(source) === ObjectPrototype;
+      if (isPrimitive || isPlainObject) {
+        throw new TypeError(
+          `MessageEvent constructor: Expected eventInitDict.source (${
+            formatForBranded(source)
+          }) to be an instance of MessagePort.`,
+        );
+      }
+      this.#source = source;
+    } else {
+      this.#source = null;
+    }
   }
 
   [SymbolFor("Deno.privateCustomInspect")](inspect, inspectOptions) {
     return inspect(
-      createFilteredInspectProxy({
+      getCreateFilteredInspectProxy()({
         object: this,
         evaluate: ObjectPrototypeIsPrototypeOf(MessageEventPrototype, this),
         keys: [
@@ -1253,7 +1444,7 @@ class CustomEvent extends Event {
 
   [SymbolFor("Deno.privateCustomInspect")](inspect, inspectOptions) {
     return inspect(
-      createFilteredInspectProxy({
+      getCreateFilteredInspectProxy()({
         object: this,
         evaluate: ObjectPrototypeIsPrototypeOf(CustomEventPrototype, this),
         keys: [
@@ -1289,7 +1480,7 @@ class ProgressEvent extends Event {
 
   [SymbolFor("Deno.privateCustomInspect")](inspect, inspectOptions) {
     return inspect(
-      createFilteredInspectProxy({
+      getCreateFilteredInspectProxy()({
         object: this,
         evaluate: ObjectPrototypeIsPrototypeOf(ProgressEventPrototype, this),
         keys: [
@@ -1342,7 +1533,7 @@ class PromiseRejectionEvent extends Event {
 
   [SymbolFor("Deno.privateCustomInspect")](inspect, inspectOptions) {
     return inspect(
-      createFilteredInspectProxy({
+      getCreateFilteredInspectProxy()({
         object: this,
         evaluate: ObjectPrototypeIsPrototypeOf(
           PromiseRejectionEventPrototype,
@@ -1512,15 +1703,20 @@ function reportError(error) {
   reportException(error);
 }
 
-export {
+internals.defineEventHandler = defineEventHandler;
+internals.setEventTargetData = setEventTargetData;
+
+return {
   CloseEvent,
   CustomEvent,
   defineEventHandler,
   dispatch,
   ErrorEvent,
   Event,
+  eventTargetData,
   EventTarget,
   EventTargetPrototype,
+  kResistStopImmediatePropagation,
   listenerCount,
   MessageEvent,
   ProgressEvent,
@@ -1532,3 +1728,4 @@ export {
   setIsTrusted,
   setTarget,
 };
+})();

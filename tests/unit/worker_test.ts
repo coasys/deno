@@ -1,4 +1,4 @@
-// Copyright 2018-2025 the Deno authors. MIT license.
+// Copyright 2018-2026 the Deno authors. MIT license.
 
 // deno-lint-ignore-file no-console
 
@@ -15,7 +15,7 @@ Deno.test(
   { permissions: { read: true } },
   function utimeSyncFileSuccess() {
     const w = new Worker(
-      resolveWorker("worker_types.ts"),
+      resolveWorker("test_worker.js"),
       { type: "module" },
     );
     assert(w);
@@ -301,7 +301,7 @@ Deno.test({
     worker.postMessage("boom");
     worker.postMessage("ping");
     assertEquals(await promise, {
-      messageHandlersCalled: 4,
+      messageHandlersCalled: 3,
       errorHandlersCalled: 4,
     });
     worker.terminate();
@@ -486,6 +486,7 @@ Deno.test("Worker limit children permissions granularly", async function () {
             "unresolved-exec",
           ],
           write: [new URL("foo", workerUrl), "bar"],
+          import: ["foo", "bar:8000"],
         },
       },
     },
@@ -506,6 +507,12 @@ Deno.test("Worker limit children permissions granularly", async function () {
     ffiFoo: "granted",
     ffiBar: "granted",
     ffiAbsent: "prompt",
+    importGlobal: "prompt",
+    importFoo: "granted",
+    importFoo8000: "granted",
+    importBar: "prompt",
+    importBar8000: "granted",
+    importAbsent: "prompt",
     readGlobal: "prompt",
     readFoo: "granted",
     readBar: "granted",
@@ -548,6 +555,12 @@ Deno.test("Nested worker limit children permissions", async function () {
     ffiFoo: "prompt",
     ffiBar: "prompt",
     ffiAbsent: "prompt",
+    importGlobal: "prompt",
+    importFoo: "prompt",
+    importFoo8000: "prompt",
+    importBar: "prompt",
+    importBar8000: "prompt",
+    importAbsent: "prompt",
     readGlobal: "prompt",
     readFoo: "prompt",
     readBar: "prompt",
@@ -620,6 +633,7 @@ Deno.test("Worker permissions are not inherited with empty permission object", a
     env: "prompt",
     net: "prompt",
     ffi: "prompt",
+    import: "prompt",
     read: "prompt",
     run: "prompt",
     write: "prompt",
@@ -644,6 +658,7 @@ Deno.test("Worker permissions are not inherited with single specified permission
     env: "prompt",
     net: "granted",
     ffi: "prompt",
+    import: "prompt",
     read: "prompt",
     run: "prompt",
     write: "prompt",
@@ -835,6 +850,67 @@ Deno.test({
     assertEquals(await deferred2.promise, true);
     assertEquals(await deferred3.promise, true);
     await result.promise;
+    worker.terminate();
+  },
+});
+
+Deno.test({
+  name: "worker main-thread receives a burst of messages (sync drain)",
+  fn: async function () {
+    // Regression test for the Web `Worker` main-side receive loop's bounded
+    // sync-drain: a worker that synchronously posts many messages in one turn
+    // must have all of them delivered to the host, in order, with no drops.
+    const worker = new Worker(
+      resolveWorker("message_burst.ts"),
+      { type: "module" },
+    );
+    const count = 500;
+    const received: number[] = [];
+    const { promise, resolve } = Promise.withResolvers<void>();
+    worker.onmessage = (e) => {
+      received.push(e.data);
+      // No transferables, so `ports` must be the cheap empty frozen array.
+      assertEquals(e.ports.length, 0);
+      if (received.length === count) resolve();
+    };
+    worker.postMessage(count);
+    await promise;
+    assertEquals(received.length, count);
+    for (let i = 0; i < count; i++) {
+      assertEquals(received[i], i);
+    }
+    worker.terminate();
+  },
+});
+
+Deno.test({
+  name: "worker onmessage re-armed between two queued messages (sync drain)",
+  fn: async function () {
+    // Regression test (mirrors WPT workers/Worker-structure-message.html): the
+    // worker replies with two messages in one turn and the host re-arms
+    // `onmessage` between them via a `.then`. The main-side sync drain must run
+    // a microtask checkpoint between the two queued messages so the second one
+    // reaches the re-armed handler instead of being delivered to the stale one.
+    const worker = new Worker(
+      resolveWorker("structure_message.ts"),
+      { type: "module" },
+    );
+    const first = await new Promise<MessageEvent>((resolve) => {
+      worker.onmessage = resolve;
+      worker.postMessage({
+        operation: "find-edges",
+        input: new ArrayBuffer(20),
+        threshold: 0.6,
+      });
+    });
+    assertEquals(first.data, "PASS");
+    const second = await new Promise<MessageEvent>((resolve) => {
+      worker.onmessage = resolve;
+    });
+    assertEquals(second.data.operation, "find-edges");
+    assert(second.data.input instanceof ArrayBuffer);
+    assertEquals(second.data.input.byteLength, 20);
+    assertEquals(second.data.threshold, 0.6);
     worker.terminate();
   },
 });

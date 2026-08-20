@@ -1,7 +1,8 @@
-// Copyright 2018-2025 the Deno authors. MIT license.
+// Copyright 2018-2026 the Deno authors. MIT license.
 
 use test_util::TestContext;
 use test_util::TestContextBuilder;
+use test_util::test;
 
 // This test only runs on linux, because it hardcodes the XDG_CACHE_HOME env var
 // which is only used on linux.
@@ -99,6 +100,32 @@ fn cache_put_overwrite() {
   let output = run_command.run();
   output.assert_matches_text("res1\n");
   output.assert_exit_code(0);
+}
+
+#[test]
+fn web_cache_is_stored_under_deno_dir() {
+  let test_context = TestContextBuilder::new().use_temp_cwd().build();
+  test_context
+    .temp_dir()
+    .write("main.js", "await caches.open('test');");
+
+  test_context
+    .new_command()
+    .args("run main.js")
+    .run()
+    .assert_exit_code(0);
+
+  let web_cache_dir = test_context
+    .deno_dir()
+    .path()
+    .join("location_data")
+    .join("web_cache");
+  let storage_dirs = std::fs::read_dir(&web_cache_dir)
+    .unwrap()
+    .collect::<Result<Vec<_>, _>>()
+    .unwrap();
+  assert_eq!(storage_dirs.len(), 1);
+  assert!(storage_dirs[0].path().join("cache_metadata.db").is_file());
 }
 
 #[test]

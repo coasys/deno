@@ -1,4 +1,4 @@
-// Copyright 2018-2025 the Deno authors. MIT license.
+// Copyright 2018-2026 the Deno authors. MIT license.
 
 import { core, primordials } from "ext:core/mod.js";
 import {
@@ -10,15 +10,78 @@ const {
   ObjectDefineProperties,
   ObjectPrototypeIsPrototypeOf,
   SymbolFor,
+  StringPrototypeToUpperCase,
+  StringPrototypeSlice,
 } = primordials;
 
-import * as location from "ext:deno_web/12_location.js";
-import * as console from "ext:deno_console/01_console.js";
-import * as webidl from "ext:deno_webidl/00_webidl.js";
-import * as globalInterfaces from "ext:deno_web/04_global_interfaces.js";
-import * as webStorage from "ext:deno_webstorage/01_webstorage.js";
-import * as prompt from "ext:runtime/41_prompt.js";
-import { loadWebGPU } from "ext:deno_webgpu/00_init.js";
+const location = core.loadExtScript("ext:deno_web/12_location.js");
+const console = core.loadExtScript("ext:deno_web/01_console.js");
+const webidl = core.loadExtScript("ext:deno_webidl/00_webidl.js");
+const globalInterfaces = core.loadExtScript(
+  "ext:deno_web/04_global_interfaces.js",
+);
+const loadLocks = core.createLazyLoader("ext:deno_web/locks.js");
+import {
+  NavigatorUAData,
+  navigatorUAData,
+} from "ext:runtime/97_navigator_user_agent_data.js";
+// `localStorage`, `sessionStorage`, `Storage`, `alert`/`confirm`/`prompt`,
+// and `navigator.gpu` are rarely accessed on the cold-start path. Their
+// implementations come from `lazy_loaded_js` polyfills that we don't want
+// to evaluate at snapshot build time. The descriptor entries below resolve
+// each polyfill on first read.
+let _webStorage;
+const lazyWebStorage = () =>
+  _webStorage ??
+    (_webStorage = core.loadExtScript("ext:deno_webstorage/01_webstorage.js"));
+let _prompt;
+const lazyPrompt = () =>
+  _prompt ?? (_prompt = core.loadExtScript("ext:runtime/41_prompt.js"));
+let _webgpu;
+const lazyWebGPU = () =>
+  (_webgpu ??
+    (_webgpu = core.loadExtScript("ext:deno_webgpu/00_init.js"))).loadWebGPU();
+function loadWebGPU() {
+  return lazyWebGPU();
+}
+
+/**
+ * @param {string} arch
+ * @param {string} platform
+ * @returns {string}
+ */
+function getNavigatorPlatform(arch, platform) {
+  switch (platform) {
+    case "darwin":
+      // On macOS, modern browsers return 'MacIntel' even if running on Apple Silicon.
+      return "MacIntel";
+
+    case "windows":
+      // On Windows, modern browsers return 'Win32' even if running on a 64-bit version of Windows.
+      // https://developer.mozilla.org/en-US/docs/Web/API/Navigator/platform#usage_notes
+      return "Win32";
+
+    case "linux":
+      return `Linux ${arch}`;
+
+    case "freebsd":
+      if (arch === "x86_64") {
+        return "FreeBSD amd64";
+      }
+      return `FreeBSD ${arch}`;
+
+    case "solaris":
+      return `SunOS ${arch}`;
+
+    case "aix":
+      return "AIX";
+
+    default:
+      return `${StringPrototypeToUpperCase(platform[0])}${
+        StringPrototypeSlice(platform, 1)
+      } ${arch}`;
+  }
+}
 
 class Navigator {
   constructor() {
@@ -35,6 +98,8 @@ class Navigator {
           "userAgent",
           "language",
           "languages",
+          "platform",
+          "userAgentData",
         ],
       }),
       inspectOptions,
@@ -57,6 +122,9 @@ function memoizeLazy(f) {
 const numCpus = memoizeLazy(() => op_bootstrap_numcpus());
 const userAgent = memoizeLazy(() => op_bootstrap_user_agent());
 const language = memoizeLazy(() => op_bootstrap_language());
+const platform = memoizeLazy(() =>
+  getNavigatorPlatform(core.build.arch, core.build.os)
+);
 
 ObjectDefineProperties(Navigator.prototype, {
   gpu: {
@@ -106,6 +174,33 @@ ObjectDefineProperties(Navigator.prototype, {
       return [language()];
     },
   },
+  locks: {
+    __proto__: null,
+    configurable: true,
+    enumerable: true,
+    get() {
+      webidl.assertBranded(this, NavigatorPrototype);
+      return loadLocks().locks;
+    },
+  },
+  platform: {
+    __proto__: null,
+    configurable: true,
+    enumerable: true,
+    get() {
+      webidl.assertBranded(this, NavigatorPrototype);
+      return platform();
+    },
+  },
+  userAgentData: {
+    __proto__: null,
+    configurable: true,
+    enumerable: true,
+    get() {
+      webidl.assertBranded(this, NavigatorPrototype);
+      return navigatorUAData;
+    },
+  },
 });
 const NavigatorPrototype = Navigator.prototype;
 
@@ -116,12 +211,32 @@ const mainRuntimeGlobalProperties = {
   self: core.propGetterOnly(() => globalThis),
   Navigator: core.propNonEnumerable(Navigator),
   navigator: core.propGetterOnly(() => navigator),
-  alert: core.propWritable(prompt.alert),
-  confirm: core.propWritable(prompt.confirm),
-  prompt: core.propWritable(prompt.prompt),
-  localStorage: core.propGetterOnly(webStorage.localStorage),
-  sessionStorage: core.propGetterOnly(webStorage.sessionStorage),
-  Storage: core.propNonEnumerable(webStorage.Storage),
+  NavigatorUAData: core.propNonEnumerable(NavigatorUAData),
+  alert: core.propWritableLazyLoaded((p) => p.alert, lazyPrompt),
+  confirm: core.propWritableLazyLoaded((p) => p.confirm, lazyPrompt),
+  prompt: core.propWritableLazyLoaded((p) => p.prompt, lazyPrompt),
+  // Match the previous descriptor shape (get-only with a silent `set() {}`):
+  // `webstorage_test.ts` relies on `globalThis.localStorage = 1` being
+  // silently ignored rather than throwing.
+  localStorage: {
+    __proto__: null,
+    configurable: true,
+    enumerable: true,
+    get() {
+      return lazyWebStorage().localStorage();
+    },
+    set() {},
+  },
+  sessionStorage: {
+    __proto__: null,
+    configurable: true,
+    enumerable: true,
+    get() {
+      return lazyWebStorage().sessionStorage();
+    },
+    set() {},
+  },
+  Storage: core.propNonEnumerableLazyLoaded((w) => w.Storage, lazyWebStorage),
 };
 
 export { mainRuntimeGlobalProperties, memoizeLazy };

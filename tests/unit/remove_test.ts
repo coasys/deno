@@ -1,4 +1,4 @@
-// Copyright 2018-2025 the Deno authors. MIT license.
+// Copyright 2018-2026 the Deno authors. MIT license.
 import { assert, assertRejects, assertThrows } from "./test_util.ts";
 
 const REMOVE_METHODS = ["remove", "removeSync"] as const;
@@ -240,18 +240,18 @@ Deno.test({ permissions: { write: false } }, async function removeAllPerm() {
 Deno.test(
   {
     ignore: Deno.build.os === "windows",
-    permissions: { write: true, read: true },
+    permissions: { write: true, read: true, net: true },
   },
   async function removeUnixSocketSuccess() {
     for (const method of REMOVE_METHODS) {
       // MAKE TEMPORARY UNIX SOCKET
       const path = Deno.makeTempDirSync() + "/test.sock";
       const listener = Deno.listen({ transport: "unix", path });
-      listener.close();
       Deno.statSync(path); // check if unix socket exists
 
       await Deno[method](path);
       assertThrows(() => Deno.statSync(path), Deno.errors.NotFound);
+      listener.close();
     }
   },
 );

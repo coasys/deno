@@ -1,164 +1,217 @@
-// Copyright 2018-2025 the Deno authors. MIT license.
+// Copyright 2018-2026 the Deno authors. MIT license.
+(function () {
+const { core, primordials } = __bootstrap;
+const { Encodings } = core.loadExtScript(
+  "ext:deno_node/internal_binding/_node.ts",
+);
 
-// TODO(petamoriken): enable prefer-primordials for node polyfills
-// deno-lint-ignore-file prefer-primordials
+const {
+  Error,
+  MathMax,
+  MathMin,
+  MathTrunc,
+  NumberIsNaN,
+  TypedArrayPrototypeGetLength,
+} = primordials;
 
-import { Encodings } from "ext:deno_node/internal_binding/_node.ts";
+function fill(
+  buffer,
+  value,
+  start,
+  end,
+) {
+  // Ignore primordial: `fill` is a method from Node.js Buffer.
+  // deno-lint-ignore deno-internal/prefer-primordials
+  return buffer.fill(value, start, end);
+}
 
-export function indexOfNeedle(
-  source: Uint8Array,
-  needle: Uint8Array,
-  start = 0,
+// Mirror of `IndexOfOffset` (node/src/node_buffer.cc). Normalizes a raw
+// `offset` (which may be negative or out of bounds) into a start index, or -1
+// when there can be no match.
+function indexOfOffset(
+  length: number,
+  offset: number,
+  needleLength: number,
+  isForward: boolean,
 ): number {
-  if (start >= source.length) {
+  if (offset < 0) {
+    if (offset + length >= 0) {
+      // Negative offsets count backwards from the end of the buffer.
+      return length + offset;
+    } else if (isForward || needleLength === 0) {
+      // From before the start of the buffer: search the whole buffer.
+      return 0;
+    }
+    // lastIndexOf from before the start of the buffer: no match.
     return -1;
   }
-  if (start < 0) {
-    start = Math.max(0, source.length + start);
+  if (offset + needleLength <= length) {
+    return offset;
+  } else if (needleLength === 0) {
+    // Out of bounds, but empty needle: point to end of buffer.
+    return length;
+  } else if (isForward) {
+    // indexOf from past the end of the buffer: no match.
+    return -1;
   }
-  const s = needle[0];
-  for (let i = start; i < source.length; i++) {
-    if (source[i] !== s) continue;
-    const pin = i;
-    let matched = 1;
-    let j = i;
-    while (matched < needle.length) {
-      j++;
-      if (source[j] !== needle[j - pin]) {
-        break;
-      }
-      matched++;
+  // lastIndexOf from past the end of the buffer: search the whole buffer.
+  return length - 1;
+}
+
+// Mirror of `nbytes::SearchString`: searches `source[0, end)` for `needle`
+// (`needleLength` bytes) in `step`-byte units (2 for UCS2), returning the byte
+// index of the occurrence nearest the requested end of the range, or -1.
+function searchBytes(
+  source: Uint8Array,
+  end: number,
+  needle: Uint8Array,
+  needleLength: number,
+  offset: number,
+  isForward: boolean,
+  step: number,
+): number {
+  if (isForward) {
+    for (let i = offset; i + needleLength <= end; i += step) {
+      let j = 0;
+      while (j < needleLength && source[i + j] === needle[j]) j++;
+      if (j === needleLength) return i;
     }
-    if (matched === needle.length) {
-      return pin;
-    }
+    return -1;
+  }
+  let start = end - needleLength;
+  if (offset < start) start = offset;
+  start -= start % step; // align to the code-unit grid (UCS2 uses offset/2)
+  for (let i = start; i >= 0; i -= step) {
+    let j = 0;
+    while (j < needleLength && source[i + j] === needle[j]) j++;
+    if (j === needleLength) return i;
   }
   return -1;
 }
 
-export function numberToBytes(n: number): Uint8Array {
-  if (n === 0) return new Uint8Array([0]);
-
-  const bytes = [];
-  bytes.unshift(n & 255);
-  while (n >= 256) {
-    n = n >>> 8;
-    bytes.unshift(n & 255);
-  }
-  return new Uint8Array(bytes);
+// `byteOffset`/`end` reach the search functions uncoerced from JS. Node reads
+// each as an int64 at the binding boundary, truncating a fractional value
+// toward zero and NaN to 0 before clamping. `byteOffset` is already
+// NaN-resolved by the caller, so it is truncated directly; `end` may still be
+// NaN, so it goes through this helper.
+function toInt64(value: number): number {
+  return NumberIsNaN(value) ? 0 : MathTrunc(value);
 }
 
-// TODO(Soremwar)
-// Check if offset or buffer can be transform in order to just use std's lastIndexOf directly
-// This implementation differs from std's lastIndexOf in the fact that
-// it also includes items outside of the offset as long as part of the
-// set is contained inside of the offset
-// Probably way slower too
-function findLastIndex(
-  targetBuffer: Uint8Array,
-  buffer: Uint8Array,
-  offset: number,
-) {
-  offset = offset > targetBuffer.length ? targetBuffer.length : offset;
-
-  const searchableBuffer = targetBuffer.slice(0, offset + buffer.length);
-  const searchableBufferLastIndex = searchableBuffer.length - 1;
-  const bufferLastIndex = buffer.length - 1;
-
-  // Important to keep track of the last match index in order to backtrack after an incomplete match
-  // Not doing this will cause the search to skip all possible matches that happened in the
-  // last match range
-  let lastMatchIndex = -1;
-  let matches = 0;
-  let index = -1;
-  for (let x = 0; x <= searchableBufferLastIndex; x++) {
-    if (
-      searchableBuffer[searchableBufferLastIndex - x] ===
-        buffer[bufferLastIndex - matches]
-    ) {
-      if (lastMatchIndex === -1) {
-        lastMatchIndex = x;
-      }
-      matches++;
-    } else {
-      matches = 0;
-      if (lastMatchIndex !== -1) {
-        // Restart the search right after the last index was ignored
-        x = lastMatchIndex + 1;
-        lastMatchIndex = -1;
-      }
-      continue;
-    }
-
-    if (matches === buffer.length) {
-      index = x;
-      break;
-    }
-  }
-
-  if (index === -1) return index;
-
-  return searchableBufferLastIndex - index;
-}
-
-// TODO(@bartlomieju):
-// Take encoding into account when evaluating index
+// Mirror of `IndexOfBuffer` (node/src/node_buffer.cc). Handles both string
+// needles (pre-encoded to bytes by the encodingOps shims) and Uint8Array
+// needles.
 function indexOfBuffer(
   targetBuffer: Uint8Array,
   buffer: Uint8Array,
   byteOffset: number,
   encoding: Encodings,
   forwardDirection: boolean,
+  end: number,
 ) {
-  if (!Encodings[encoding] === undefined) {
+  if (Encodings[encoding] === undefined) {
     throw new Error(`Unknown encoding code ${encoding}`);
   }
+  byteOffset = MathTrunc(byteOffset);
+  end = toInt64(end);
 
-  if (!forwardDirection) {
-    // If negative the offset is calculated from the end of the buffer
+  const haystackLength = TypedArrayPrototypeGetLength(targetBuffer);
+  const needleLength = TypedArrayPrototypeGetLength(buffer);
+  const isUcs2 = encoding === Encodings.UCS2;
 
-    if (byteOffset < 0) {
-      byteOffset = targetBuffer.length + byteOffset;
-    }
+  // search_end is the exclusive upper bound of the search range.
+  let searchEnd = MathMin(MathMax(end, 0), haystackLength);
+  if (isUcs2) searchEnd &= ~1;
 
-    if (buffer.length === 0) {
-      return byteOffset <= targetBuffer.length
-        ? byteOffset
-        : targetBuffer.length;
-    }
+  const optOffset = indexOfOffset(
+    haystackLength,
+    byteOffset,
+    needleLength,
+    forwardDirection,
+  );
 
-    return findLastIndex(targetBuffer, buffer, byteOffset);
+  if (needleLength === 0) {
+    // Empty needle: match String#indexOf behavior, clamped to search_end.
+    return MathMin(optOffset, searchEnd);
   }
+  if (haystackLength === 0) return -1;
+  if (optOffset === -1) return -1;
 
-  if (buffer.length === 0) {
-    return byteOffset <= targetBuffer.length ? byteOffset : targetBuffer.length;
+  let offset = optOffset;
+  if (!forwardDirection && offset >= searchEnd) {
+    if (searchEnd === 0) return -1;
+    offset = searchEnd - 1;
+  } else if (forwardDirection && offset >= searchEnd) {
+    return -1;
   }
+  if (
+    (forwardDirection && needleLength + offset > searchEnd) ||
+    needleLength > searchEnd
+  ) {
+    return -1;
+  }
+  if (isUcs2 && (searchEnd < 2 || needleLength < 2)) return -1;
 
-  return indexOfNeedle(targetBuffer, buffer, byteOffset);
+  // For UCS2, Node searches the uint16 view: it aligns `offset` down to the
+  // code-unit grid (offset / 2) and drops any trailing odd needle byte
+  // (needle_length / 2). Mirror that here in byte space. The guards above still
+  // use the raw `needleLength`, matching Node.
+  return searchBytes(
+    targetBuffer,
+    searchEnd,
+    buffer,
+    isUcs2 ? needleLength & ~1 : needleLength,
+    isUcs2 ? offset & ~1 : offset,
+    forwardDirection,
+    isUcs2 ? 2 : 1,
+  );
 }
 
-// TODO(Soremwar)
-// Node's implementation is a very obscure algorithm that I haven't been able to crack just yet
+// Mirror of `IndexOfNumberImpl` (node/src/node_buffer.cc).
 function indexOfNumber(
   targetBuffer: Uint8Array,
   number: number,
   byteOffset: number,
   forwardDirection: boolean,
+  end: number,
 ) {
-  const bytes = numberToBytes(number);
-
-  if (bytes.length > 1) {
-    throw new Error("Multi byte number search is not supported");
-  }
-
-  return indexOfBuffer(
-    targetBuffer,
-    numberToBytes(number),
+  byteOffset = MathTrunc(byteOffset);
+  end = toInt64(end);
+  // Uses only the last byte of the number.
+  // https://github.com/nodejs/node/issues/7591#issuecomment-231178104
+  number &= 255;
+  const bufferLength = TypedArrayPrototypeGetLength(targetBuffer);
+  const optOffset = indexOfOffset(
+    bufferLength,
     byteOffset,
-    Encodings.UTF8,
+    1,
     forwardDirection,
   );
+  if (optOffset === -1 || bufferLength === 0) return -1;
+
+  const offset = optOffset;
+  const searchEnd = MathMin(MathMax(end, 0), bufferLength);
+  if (forwardDirection) {
+    if (offset >= searchEnd) return -1;
+    for (let i = offset; i < searchEnd; i++) {
+      if (targetBuffer[i] === number) return i;
+    }
+    return -1;
+  }
+  const backwardEnd = MathMin(offset + 1, searchEnd);
+  if (backwardEnd === 0) return -1;
+  for (let i = backwardEnd - 1; i >= 0; i--) {
+    if (targetBuffer[i] === number) return i;
+  }
+  return -1;
 }
 
-export default { indexOfBuffer, indexOfNumber };
-export { indexOfBuffer, indexOfNumber };
+const _defaultExport = { indexOfBuffer, indexOfNumber };
+
+return {
+  indexOfBuffer,
+  indexOfNumber,
+  fill,
+  default: _defaultExport,
+};
+})();

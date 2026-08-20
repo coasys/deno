@@ -1,4 +1,4 @@
-// Copyright 2018-2025 the Deno authors. MIT license.
+// Copyright 2018-2026 the Deno authors. MIT license.
 
 // @ts-check
 /// <reference path="../../core/lib.deno_core.d.ts" />
@@ -9,24 +9,28 @@
 /// <reference path="../../cli/tsc/dts/lib.deno_web.d.ts" />
 /// <reference lib="esnext" />
 
-import { core, primordials } from "ext:core/mod.js";
+(function () {
+const { core, primordials } = __bootstrap;
 const {
   isDataView,
   isSharedArrayBuffer,
   isTypedArray,
 } = core;
-import {
+const {
   op_encoding_decode,
   op_encoding_decode_single,
   op_encoding_decode_utf8,
+  op_encoding_decode_utf8_ascii_only,
   op_encoding_encode_into,
+  op_encoding_encode_into_fallback,
   op_encoding_new_decoder,
   op_encoding_normalize_label,
-} from "ext:core/ops";
+} = core.ops;
 const {
   DataViewPrototypeGetBuffer,
   DataViewPrototypeGetByteLength,
   DataViewPrototypeGetByteOffset,
+  MathTrunc,
   ObjectPrototypeIsPrototypeOf,
   PromiseReject,
   PromiseResolve,
@@ -38,13 +42,16 @@ const {
   TypedArrayPrototypeGetBuffer,
   TypedArrayPrototypeGetByteLength,
   TypedArrayPrototypeGetByteOffset,
+  TypedArrayPrototypeGetSymbolToStringTag,
   TypedArrayPrototypeSubarray,
   Uint32Array,
   Uint8Array,
 } = primordials;
 
-import * as webidl from "ext:deno_webidl/00_webidl.js";
-import { createFilteredInspectProxy } from "ext:deno_console/01_console.js";
+const webidl = core.loadExtScript("ext:deno_webidl/00_webidl.js");
+const { createFilteredInspectProxy } = core.loadExtScript(
+  "ext:deno_web/01_console.js",
+);
 
 class TextDecoder {
   /** @type {string} */
@@ -71,7 +78,24 @@ class TextDecoder {
       prefix,
       "Argument 2",
     );
-    const encoding = op_encoding_normalize_label(label);
+    // Fast path for common UTF-8 labels - avoid Rust op call
+    let encoding;
+    if (
+      label === "utf-8" || label === "utf8" || label === "unicode-1-1-utf-8"
+    ) {
+      encoding = "utf-8";
+    } else {
+      try {
+        encoding = op_encoding_normalize_label(label);
+      } catch (err) {
+        // The op only rejects unknown encoding labels; Node attaches
+        // ERR_ENCODING_NOT_SUPPORTED to that error.
+        if (err !== null && typeof err === "object" && err.code === undefined) {
+          err.code = "ERR_ENCODING_NOT_SUPPORTED";
+        }
+        throw err;
+      }
+    }
     this.#encoding = encoding;
     this.#fatal = options.fatal;
     this.#ignoreBOM = options.ignoreBOM;
@@ -103,20 +127,44 @@ class TextDecoder {
    */
   decode(input = new Uint8Array(), options = undefined) {
     webidl.assertBranded(this, TextDecoderPrototype);
-    const prefix = "Failed to execute 'decode' on 'TextDecoder'";
+    // Hyper-fast path: handles the dominant case of
+    // `new TextDecoder().decode(bytes)` on a regular (non-SAB) Uint8Array.
+    // Skips the second buffer/SAB lookup, the options/stream branches and the
+    // try/finally that the slow path needs.
+    if (
+      options === undefined &&
+      this.#utf8SinglePass &&
+      this.#handle === null &&
+      TypedArrayPrototypeGetSymbolToStringTag(input) === "Uint8Array" &&
+      !isSharedArrayBuffer(TypedArrayPrototypeGetBuffer(input))
+    ) {
+      return op_encoding_decode_utf8(input, this.#ignoreBOM);
+    }
     if (input !== undefined) {
-      input = webidl.converters.BufferSource(input, prefix, "Argument 1", {
-        allowShared: true,
-      });
+      // Fast path: skip full BufferSource validation for Uint8Array
+      if (
+        !(TypedArrayPrototypeGetSymbolToStringTag(input) === "Uint8Array") ||
+        isSharedArrayBuffer(TypedArrayPrototypeGetBuffer(input))
+      ) {
+        const prefix = "Failed to execute 'decode' on 'TextDecoder'";
+        input = webidl.converters.BufferSource(input, prefix, "Argument 1", {
+          allowShared: true,
+        });
+      }
     }
     let stream = false;
     if (options !== undefined) {
+      const prefix = "Failed to execute 'decode' on 'TextDecoder'";
       options = webidl.converters.TextDecodeOptions(
         options,
         prefix,
         "Argument 2",
       );
       stream = options.stream;
+    }
+
+    if (stream && input.length === 0) {
+      return "";
     }
 
     try {
@@ -173,6 +221,19 @@ class TextDecoder {
         );
       }
 
+      // Streaming UTF-8 fast path. While the decoder has no pending state
+      // (`#handle === null`), an ASCII-only chunk decodes the same way
+      // single-pass would: there are no partial codepoints to carry over,
+      // so we can hand V8 the bytes directly as a one-byte string and skip
+      // both the `Vec<u16>` allocation and the UTF-8 -> UTF-16 conversion
+      // in `op_encoding_decode`. `op_encoding_decode_utf8_ascii_only`
+      // returns `null` for any non-ASCII byte, in which case we fall
+      // through to the general streaming op (which will create the handle).
+      if (stream && this.#utf8SinglePass && this.#handle === null) {
+        const ascii = op_encoding_decode_utf8_ascii_only(input);
+        if (ascii !== null) return ascii;
+      }
+
       if (this.#handle === null) {
         this.#handle = op_encoding_new_decoder(
           this.#encoding,
@@ -224,13 +285,14 @@ class TextEncoder {
    */
   encode(input = "") {
     webidl.assertBranded(this, TextEncoderPrototype);
-    // The WebIDL type of `input` is `USVString`, but `core.encode` already
-    // converts lone surrogates to the replacement character.
-    input = webidl.converters.DOMString(
-      input,
-      "Failed to execute 'encode' on 'TextEncoder'",
-      "Argument 1",
-    );
+    // Fast path: if input is already a string, skip DOMString converter
+    if (typeof input !== "string") {
+      input = webidl.converters.DOMString(
+        input,
+        "Failed to execute 'encode' on 'TextEncoder'",
+        "Argument 1",
+      );
+    }
     return core.encode(input);
   }
 
@@ -241,22 +303,38 @@ class TextEncoder {
    */
   encodeInto(source, destination) {
     webidl.assertBranded(this, TextEncoderPrototype);
-    const prefix = "Failed to execute 'encodeInto' on 'TextEncoder'";
-    // The WebIDL type of `source` is `USVString`, but the ops bindings
-    // already convert lone surrogates to the replacement character.
-    source = webidl.converters.DOMString(source, prefix, "Argument 1");
-    destination = webidl.converters.Uint8Array(
-      destination,
-      prefix,
-      "Argument 2",
-      {
-        allowShared: true,
-      },
-    );
-    op_encoding_encode_into(source, destination, encodeIntoBuf);
+    // Fast path: source is already a string and destination is already a
+    // regular Uint8Array. Skips the DOMString and Uint8Array WebIDL converters
+    // (and the per-call `{ allowShared: true }` opts allocation that the
+    // Uint8Array converter takes). The op already replaces lone surrogates
+    // with the U+FFFD replacement character (matching USVString semantics).
+    if (
+      typeof source !== "string" ||
+      TypedArrayPrototypeGetSymbolToStringTag(destination) !== "Uint8Array"
+    ) {
+      const prefix = "Failed to execute 'encodeInto' on 'TextEncoder'";
+      // The WebIDL type of `source` is `USVString`, but the ops bindings
+      // already convert lone surrogates to the replacement character.
+      source = webidl.converters.DOMString(source, prefix, "Argument 1");
+      destination = webidl.converters.Uint8Array(
+        destination,
+        prefix,
+        "Argument 2",
+        encodeIntoOpts,
+      );
+    }
+    const packed = op_encoding_encode_into(source, destination);
+    if (packed === ENCODE_INTO_PACKED_SENTINEL) {
+      op_encoding_encode_into_fallback(source, destination, encodeIntoBuf);
+      return {
+        read: encodeIntoBuf[0],
+        written: encodeIntoBuf[1],
+      };
+    }
+    const read = MathTrunc(packed / ENCODE_INTO_PACKED_MULTIPLIER);
     return {
-      read: encodeIntoBuf[0],
-      written: encodeIntoBuf[1],
+      read,
+      written: packed - read * ENCODE_INTO_PACKED_MULTIPLIER,
     };
   }
 
@@ -273,6 +351,9 @@ class TextEncoder {
 }
 
 const encodeIntoBuf = new Uint32Array(2);
+const encodeIntoOpts = { __proto__: null, allowShared: true };
+const ENCODE_INTO_PACKED_SENTINEL = -1;
+const ENCODE_INTO_PACKED_MULTIPLIER = 0x100000000;
 
 webidl.configureInterface(TextEncoder);
 const TextEncoderPrototype = TextEncoder.prototype;
@@ -299,18 +380,16 @@ class TextDecoderStream {
     this.#transform = new TransformStream({
       // The transform and flush functions need access to TextDecoderStream's
       // `this`, so they are defined as functions rather than methods.
+      // Synchronous transform: the TransformStream fast path resolves the write
+      // without a per-chunk promise or microtask hop when transform() returns
+      // undefined. Throws propagate to the stream via transformAlgorithm.
       transform: (chunk, controller) => {
-        try {
-          chunk = webidl.converters.BufferSource(chunk, prefix, "chunk", {
-            allowShared: true,
-          });
-          const decoded = this.#decoder.decode(chunk, { stream: true });
-          if (decoded) {
-            controller.enqueue(decoded);
-          }
-          return PromiseResolve();
-        } catch (err) {
-          return PromiseReject(err);
+        chunk = webidl.converters.BufferSource(chunk, prefix, "chunk", {
+          allowShared: true,
+        });
+        const decoded = this.#decoder.decode(chunk, { stream: true });
+        if (decoded) {
+          controller.enqueue(decoded);
         }
       },
       flush: (controller) => {
@@ -400,31 +479,29 @@ class TextEncoderStream {
     this.#transform = new TransformStream({
       // The transform and flush functions need access to TextEncoderStream's
       // `this`, so they are defined as functions rather than methods.
+      // Synchronous transform: the TransformStream fast path resolves the write
+      // without a per-chunk promise or microtask hop when transform() returns
+      // undefined. Throws propagate to the stream via transformAlgorithm.
       transform: (chunk, controller) => {
-        try {
-          chunk = webidl.converters.DOMString(chunk);
-          if (chunk === "") {
-            return PromiseResolve();
-          }
-          if (this.#pendingHighSurrogate !== null) {
-            chunk = this.#pendingHighSurrogate + chunk;
-          }
-          const lastCodeUnit = StringPrototypeCharCodeAt(
-            chunk,
-            chunk.length - 1,
-          );
-          if (0xD800 <= lastCodeUnit && lastCodeUnit <= 0xDBFF) {
-            this.#pendingHighSurrogate = StringPrototypeSlice(chunk, -1);
-            chunk = StringPrototypeSlice(chunk, 0, -1);
-          } else {
-            this.#pendingHighSurrogate = null;
-          }
-          if (chunk) {
-            controller.enqueue(core.encode(chunk));
-          }
-          return PromiseResolve();
-        } catch (err) {
-          return PromiseReject(err);
+        chunk = webidl.converters.DOMString(chunk);
+        if (chunk === "") {
+          return;
+        }
+        if (this.#pendingHighSurrogate !== null) {
+          chunk = this.#pendingHighSurrogate + chunk;
+        }
+        const lastCodeUnit = StringPrototypeCharCodeAt(
+          chunk,
+          chunk.length - 1,
+        );
+        if (0xD800 <= lastCodeUnit && lastCodeUnit <= 0xDBFF) {
+          this.#pendingHighSurrogate = StringPrototypeSlice(chunk, -1);
+          chunk = StringPrototypeSlice(chunk, 0, -1);
+        } else {
+          this.#pendingHighSurrogate = null;
+        }
+        if (chunk) {
+          controller.enqueue(core.encode(chunk));
         }
       },
       flush: (controller) => {
@@ -532,10 +609,11 @@ function BOMSniff(bytes) {
   return null;
 }
 
-export {
+return {
   decode,
   TextDecoder,
   TextDecoderStream,
   TextEncoder,
   TextEncoderStream,
 };
+})();

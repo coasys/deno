@@ -1,4 +1,4 @@
-// Copyright 2018-2025 the Deno authors. MIT license.
+// Copyright 2018-2026 the Deno authors. MIT license.
 use crate::*;
 
 #[repr(C)]
@@ -6,7 +6,13 @@ use crate::*;
 pub struct CallbackInfo {
   pub env: *mut Env,
   pub cb: napi_callback,
-  pub cb_info: napi_callback_info,
+  pub data: *mut c_void,
+}
+
+#[repr(C)]
+#[derive(Debug)]
+pub struct CallbackInfoScope {
+  pub function_info: *const CallbackInfo,
   pub args: *const c_void,
 }
 
@@ -15,22 +21,18 @@ impl CallbackInfo {
   pub fn new_raw(
     env: *mut Env,
     cb: napi_callback,
-    cb_info: napi_callback_info,
+    data: *mut c_void,
   ) -> *mut Self {
-    Box::into_raw(Box::new(Self {
-      env,
-      cb,
-      cb_info,
-      args: std::ptr::null(),
-    }))
+    Box::into_raw(Box::new(Self { env, cb, data }))
   }
 }
 
 extern "C" fn call_fn(info: *const v8::FunctionCallbackInfo) {
-  let callback_info = unsafe { &*info };
-  let args =
-    v8::FunctionCallbackArguments::from_function_callback_info(callback_info);
-  let mut rv = v8::ReturnValue::from_function_callback_info(callback_info);
+  let v8_callback_info = unsafe { &*info };
+  let args = v8::FunctionCallbackArguments::from_function_callback_info(
+    v8_callback_info,
+  );
+  let mut rv = v8::ReturnValue::from_function_callback_info(v8_callback_info);
   // SAFETY: create_function guarantees that the data is a CallbackInfo external.
   let info_ptr: *mut CallbackInfo = unsafe {
     let external_value = v8::Local::<v8::External>::cast_unchecked(args.data());
@@ -38,13 +40,21 @@ extern "C" fn call_fn(info: *const v8::FunctionCallbackInfo) {
   };
 
   // SAFETY: pointer from Box::into_raw.
-  let info = unsafe { &mut *info_ptr };
-  info.args = &args as *const _ as *const c_void;
+  let info = unsafe { &*info_ptr };
+  let mut callback_info_scope = CallbackInfoScope {
+    function_info: info_ptr,
+    args: &args as *const _ as *const c_void,
+  };
 
   // SAFETY: calling user provided function pointer.
-  let value = unsafe { (info.cb)(info.env as napi_env, info_ptr as *mut _) };
+  let value = unsafe {
+    (info.cb)(
+      info.env as napi_env,
+      &mut callback_info_scope as *mut _ as *mut c_void,
+    )
+  };
   if let Some(exc) = unsafe { &mut *info.env }.last_exception.take() {
-    let scope = unsafe { &mut v8::CallbackScope::new(callback_info) };
+    v8::callback_scope!(unsafe scope, v8_callback_info);
     let exc = v8::Local::new(scope, exc);
     scope.throw_exception(exc);
   }
@@ -54,14 +64,14 @@ extern "C" fn call_fn(info: *const v8::FunctionCallbackInfo) {
 }
 
 pub fn create_function<'s>(
-  scope: &mut v8::HandleScope<'s>,
+  scope: &mut v8::PinScope<'s, '_>,
   env: *mut Env,
   name: Option<v8::Local<v8::String>>,
   cb: napi_callback,
-  cb_info: napi_callback_info,
+  data: *mut c_void,
 ) -> v8::Local<'s, v8::Function> {
   let external =
-    v8::External::new(scope, CallbackInfo::new_raw(env, cb, cb_info) as *mut _);
+    v8::External::new(scope, CallbackInfo::new_raw(env, cb, data) as *mut _);
   let function = v8::Function::builder_raw(call_fn)
     .data(external.into())
     .build(scope)
@@ -75,7 +85,7 @@ pub fn create_function<'s>(
 }
 
 pub fn create_function_template<'s>(
-  scope: &mut v8::HandleScope<'s>,
+  scope: &mut v8::PinScope<'s, '_>,
   env: *mut Env,
   name: Option<v8::Local<v8::String>>,
   cb: napi_callback,

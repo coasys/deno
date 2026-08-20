@@ -1,4 +1,4 @@
-// Copyright 2018-2025 the Deno authors. MIT license.
+// Copyright 2018-2026 the Deno authors. MIT license.
 import {
   assert,
   assertEquals,
@@ -251,13 +251,6 @@ Deno.test(
       },
       Error,
       "The directory is not empty",
-    );
-    assertThrows(
-      () => {
-        Deno.renameSync(olddir, file);
-      },
-      Error,
-      "The directory name is invalid",
     );
 
     // should succeed on Windows

@@ -1,4 +1,4 @@
-// Copyright 2018-2025 the Deno authors. MIT license.
+// Copyright 2018-2026 the Deno authors. MIT license.
 import { assertEquals, assertRejects, assertThrows } from "./test_util.ts";
 
 Deno.test(
@@ -110,5 +110,91 @@ Deno.test(
       Deno.errors.NotFound,
       `truncate '${filename}'`,
     );
+  },
+);
+
+// truncate does not follow a terminal symlink: the permission check is done
+// no-follow, so a symlink at an allowed path must not be usable to zero out a
+// file it points to. The open uses O_NOFOLLOW and fails with FilesystemLoop
+// (ELOOP) on a symlink target, rather than a permission error or silently
+// truncating the link's target.
+Deno.test(
+  {
+    permissions: { read: true, write: true },
+    ignore: Deno.build.os === "windows",
+  },
+  function truncateSyncDoesNotFollowSymlink() {
+    const dir = Deno.makeTempDirSync();
+    const target = dir + "/target.txt";
+    const link = dir + "/link.txt";
+    Deno.writeFileSync(target, new Uint8Array([1, 2, 3, 4, 5]));
+    Deno.symlinkSync(target, link);
+
+    assertThrows(
+      () => Deno.truncateSync(link, 0),
+      Deno.errors.FilesystemLoop,
+    );
+    assertEquals(Deno.readFileSync(target).byteLength, 5);
+  },
+);
+
+Deno.test(
+  {
+    permissions: { read: true, write: true },
+    ignore: Deno.build.os === "windows",
+  },
+  async function truncateDoesNotFollowSymlink() {
+    const dir = Deno.makeTempDirSync();
+    const target = dir + "/target.txt";
+    const link = dir + "/link.txt";
+    await Deno.writeFile(target, new Uint8Array([1, 2, 3, 4, 5]));
+    await Deno.symlink(target, link);
+
+    await assertRejects(
+      () => Deno.truncate(link, 0),
+      Deno.errors.FilesystemLoop,
+    );
+    assertEquals((await Deno.readFile(target)).byteLength, 5);
+  },
+);
+
+// O_NOFOLLOW only protects the final path component. A symlink in an ancestor
+// directory is still resolved, so truncating a regular file reached through a
+// symlinked directory continues to work.
+Deno.test(
+  {
+    permissions: { read: true, write: true },
+    ignore: Deno.build.os === "windows",
+  },
+  function truncateSyncFollowsIntermediateSymlink() {
+    const dir = Deno.makeTempDirSync();
+    const realDir = dir + "/real";
+    Deno.mkdirSync(realDir);
+    const file = realDir + "/data.txt";
+    Deno.writeFileSync(file, new Uint8Array([1, 2, 3, 4, 5]));
+    const linkDir = dir + "/linkdir";
+    Deno.symlinkSync(realDir, linkDir);
+
+    Deno.truncateSync(linkDir + "/data.txt", 2);
+    assertEquals(Deno.readFileSync(file).byteLength, 2);
+  },
+);
+
+Deno.test(
+  {
+    permissions: { read: true, write: true },
+    ignore: Deno.build.os === "windows",
+  },
+  async function truncateFollowsIntermediateSymlink() {
+    const dir = Deno.makeTempDirSync();
+    const realDir = dir + "/real";
+    await Deno.mkdir(realDir);
+    const file = realDir + "/data.txt";
+    await Deno.writeFile(file, new Uint8Array([1, 2, 3, 4, 5]));
+    const linkDir = dir + "/linkdir";
+    await Deno.symlink(realDir, linkDir);
+
+    await Deno.truncate(linkDir + "/data.txt", 2);
+    assertEquals((await Deno.readFile(file)).byteLength, 2);
   },
 );

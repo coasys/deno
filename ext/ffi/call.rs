@@ -1,29 +1,28 @@
-// Copyright 2018-2025 the Deno authors. MIT license.
+// Copyright 2018-2026 the Deno authors. MIT license.
 
 use std::cell::RefCell;
 use std::ffi::c_void;
 use std::future::Future;
 use std::rc::Rc;
 
-use deno_core::op2;
-use deno_core::serde_json::Value;
-use deno_core::serde_v8::BigInt as V8BigInt;
-use deno_core::serde_v8::ExternalPointer;
-use deno_core::unsync::spawn_blocking;
-use deno_core::v8;
 use deno_core::OpState;
 use deno_core::ResourceId;
+use deno_core::ToV8;
+use deno_core::convert::BigInt as ConvertBigInt;
+use deno_core::convert::ExternalPointer;
+use deno_core::op2;
+use deno_core::unsync::spawn_blocking;
+use deno_core::v8;
+use deno_permissions::PermissionsContainer;
 use libffi::middle::Arg;
 use num_bigint::BigInt;
-use serde::Serialize;
 
+use crate::ForeignFunction;
 use crate::callback::PtrSymbol;
 use crate::dlfcn::DynamicLibraryResource;
 use crate::ir::*;
 use crate::symbol::NativeType;
 use crate::symbol::Symbol;
-use crate::FfiPermissions;
-use crate::ForeignFunction;
 
 #[derive(Debug, thiserror::Error, deno_error::JsError)]
 pub enum CallError {
@@ -54,17 +53,23 @@ unsafe fn ffi_call_rtype_struct(
   call_args: Vec<Arg>,
   out_buffer: *mut u8,
 ) {
-  libffi::raw::ffi_call(
-    cif.as_raw_ptr(),
-    Some(*fn_ptr.as_safe_fun()),
-    out_buffer as *mut c_void,
-    call_args.as_ptr() as *mut *mut c_void,
-  );
+  #[allow(
+    clippy::undocumented_unsafe_blocks,
+    reason = "safety comment on the containing block"
+  )]
+  unsafe {
+    libffi::raw::ffi_call(
+      cif.as_raw_ptr(),
+      Some(*fn_ptr.as_safe_fun()),
+      out_buffer as *mut c_void,
+      call_args.as_ptr() as *mut *mut c_void,
+    );
+  }
 }
 
 // A one-off synchronous FFI call.
 pub(crate) fn ffi_call_sync<'scope>(
-  scope: &mut v8::HandleScope<'scope>,
+  scope: &mut v8::PinScope<'scope, '_>,
   args: v8::FunctionCallbackArguments,
   symbol: &Symbol,
   out_buffer: Option<OutBuffer>,
@@ -210,11 +215,13 @@ where
   }
 }
 
-#[derive(Serialize)]
-#[serde(untagged)]
+#[derive(ToV8)]
+#[to_v8(untagged)]
 pub enum FfiValue {
-  Value(Value),
-  BigInt(V8BigInt),
+  Null,
+  Bool(bool),
+  Number(f64),
+  BigInt(ConvertBigInt),
   External(ExternalPointer),
 }
 
@@ -241,47 +248,43 @@ fn ffi_call(
     match result_type {
       NativeType::Void => {
         cif.call::<()>(fun_ptr, &call_args);
-        FfiValue::Value(Value::from(()))
+        FfiValue::Null
       }
-      NativeType::Bool => {
-        FfiValue::Value(Value::from(cif.call::<bool>(fun_ptr, &call_args)))
-      }
+      NativeType::Bool => FfiValue::Bool(cif.call::<bool>(fun_ptr, &call_args)),
       NativeType::U8 => {
-        FfiValue::Value(Value::from(cif.call::<u8>(fun_ptr, &call_args)))
+        FfiValue::Number(cif.call::<u8>(fun_ptr, &call_args) as f64)
       }
       NativeType::I8 => {
-        FfiValue::Value(Value::from(cif.call::<i8>(fun_ptr, &call_args)))
+        FfiValue::Number(cif.call::<i8>(fun_ptr, &call_args) as f64)
       }
       NativeType::U16 => {
-        FfiValue::Value(Value::from(cif.call::<u16>(fun_ptr, &call_args)))
+        FfiValue::Number(cif.call::<u16>(fun_ptr, &call_args) as f64)
       }
       NativeType::I16 => {
-        FfiValue::Value(Value::from(cif.call::<i16>(fun_ptr, &call_args)))
+        FfiValue::Number(cif.call::<i16>(fun_ptr, &call_args) as f64)
       }
       NativeType::U32 => {
-        FfiValue::Value(Value::from(cif.call::<u32>(fun_ptr, &call_args)))
+        FfiValue::Number(cif.call::<u32>(fun_ptr, &call_args) as f64)
       }
       NativeType::I32 => {
-        FfiValue::Value(Value::from(cif.call::<i32>(fun_ptr, &call_args)))
+        FfiValue::Number(cif.call::<i32>(fun_ptr, &call_args) as f64)
       }
-      NativeType::U64 => FfiValue::BigInt(V8BigInt::from(BigInt::from(
+      NativeType::U64 => FfiValue::BigInt(ConvertBigInt::from(BigInt::from(
         cif.call::<u64>(fun_ptr, &call_args),
       ))),
-      NativeType::I64 => FfiValue::BigInt(V8BigInt::from(BigInt::from(
+      NativeType::I64 => FfiValue::BigInt(ConvertBigInt::from(BigInt::from(
         cif.call::<i64>(fun_ptr, &call_args),
       ))),
-      NativeType::USize => FfiValue::BigInt(V8BigInt::from(BigInt::from(
+      NativeType::USize => FfiValue::BigInt(ConvertBigInt::from(BigInt::from(
         cif.call::<usize>(fun_ptr, &call_args),
       ))),
-      NativeType::ISize => FfiValue::BigInt(V8BigInt::from(BigInt::from(
+      NativeType::ISize => FfiValue::BigInt(ConvertBigInt::from(BigInt::from(
         cif.call::<isize>(fun_ptr, &call_args),
       ))),
       NativeType::F32 => {
-        FfiValue::Value(Value::from(cif.call::<f32>(fun_ptr, &call_args)))
+        FfiValue::Number(cif.call::<f32>(fun_ptr, &call_args) as f64)
       }
-      NativeType::F64 => {
-        FfiValue::Value(Value::from(cif.call::<f64>(fun_ptr, &call_args)))
-      }
+      NativeType::F64 => FfiValue::Number(cif.call::<f64>(fun_ptr, &call_args)),
       NativeType::Pointer | NativeType::Function | NativeType::Buffer => {
         FfiValue::External(ExternalPointer::from(
           cif.call::<*mut c_void>(fun_ptr, &call_args),
@@ -289,45 +292,56 @@ fn ffi_call(
       }
       NativeType::Struct(_) => {
         ffi_call_rtype_struct(cif, &fun_ptr, call_args, out_buffer.unwrap().0);
-        FfiValue::Value(Value::Null)
+        FfiValue::Null
       }
     }
   }
 }
 
-#[op2(async, stack_trace)]
-#[serde]
-pub fn op_ffi_call_ptr_nonblocking<FP>(
-  scope: &mut v8::HandleScope,
+#[op2(stack_trace)]
+pub fn op_ffi_call_ptr_nonblocking(
+  scope: &mut v8::PinScope<'_, '_>,
   state: Rc<RefCell<OpState>>,
   pointer: *mut c_void,
   #[serde] def: ForeignFunction,
   parameters: v8::Local<v8::Array>,
   out_buffer: Option<v8::Local<v8::TypedArray>>,
-) -> Result<impl Future<Output = Result<FfiValue, CallError>>, CallError>
+) -> Result<impl Future<Output = Result<FfiValue, CallError>> + use<>, CallError>
 where
-  FP: FfiPermissions + 'static,
 {
   {
     let mut state = state.borrow_mut();
-    let permissions = state.borrow_mut::<FP>();
-    permissions.check_partial_no_path()?;
+    let permissions = state.borrow_mut::<PermissionsContainer>();
+    permissions.check_ffi_partial_no_path()?;
   };
 
   let symbol = PtrSymbol::new(pointer, &def)?;
-  let call_args = ffi_parse_args(scope, parameters, &def.parameters)?;
-  let out_buffer_ptr = out_buffer_as_ptr(scope, out_buffer);
+  let mut backing_store_holder = BackingStoreHolder::new();
+  let call_args = ffi_parse_args_nonblocking(
+    scope,
+    parameters,
+    &def.parameters,
+    &mut backing_store_holder,
+  )?;
+  let out_buffer_ptr = out_buffer_as_ptr_nonblocking(
+    scope,
+    out_buffer,
+    &mut backing_store_holder,
+  )?;
 
   let join_handle = spawn_blocking(move || {
     let PtrSymbol { cif, ptr } = symbol.clone();
-    ffi_call(
+    let result = ffi_call(
       call_args,
       &cif,
       ptr,
       &def.parameters,
       def.result,
       out_buffer_ptr,
-    )
+    );
+    // prevent backing stores from being dropped before the FFI call completes
+    drop(backing_store_holder);
+    result
   });
 
   Ok(async move {
@@ -340,16 +354,16 @@ where
 }
 
 /// A non-blocking FFI call.
-#[op2(async)]
-#[serde]
+#[op2]
 pub fn op_ffi_call_nonblocking(
-  scope: &mut v8::HandleScope,
+  scope: &mut v8::PinScope<'_, '_>,
   state: Rc<RefCell<OpState>>,
   #[smi] rid: ResourceId,
   #[string] symbol: String,
   parameters: v8::Local<v8::Array>,
   out_buffer: Option<v8::Local<v8::TypedArray>>,
-) -> Result<impl Future<Output = Result<FfiValue, CallError>>, CallError> {
+) -> Result<impl Future<Output = Result<FfiValue, CallError>> + use<>, CallError>
+{
   let symbol = {
     let state = state.borrow();
     let resource = state.resource_table.get::<DynamicLibraryResource>(rid)?;
@@ -360,8 +374,18 @@ pub fn op_ffi_call_nonblocking(
       .clone()
   };
 
-  let call_args = ffi_parse_args(scope, parameters, &symbol.parameter_types)?;
-  let out_buffer_ptr = out_buffer_as_ptr(scope, out_buffer);
+  let mut backing_store_holder = BackingStoreHolder::new();
+  let call_args = ffi_parse_args_nonblocking(
+    scope,
+    parameters,
+    &symbol.parameter_types,
+    &mut backing_store_holder,
+  )?;
+  let out_buffer_ptr = out_buffer_as_ptr_nonblocking(
+    scope,
+    out_buffer,
+    &mut backing_store_holder,
+  )?;
 
   let join_handle = spawn_blocking(move || {
     let Symbol {
@@ -371,14 +395,17 @@ pub fn op_ffi_call_nonblocking(
       result_type,
       ..
     } = symbol.clone();
-    ffi_call(
+    let result = ffi_call(
       call_args,
       &cif,
       ptr,
       &parameter_types,
       result_type,
       out_buffer_ptr,
-    )
+    );
+    // prevent backing stores from being dropped before the FFI call completes
+    drop(backing_store_holder);
+    result
   });
 
   Ok(async move {
@@ -391,22 +418,18 @@ pub fn op_ffi_call_nonblocking(
 }
 
 #[op2(reentrant, stack_trace)]
-#[serde]
-pub fn op_ffi_call_ptr<FP>(
-  scope: &mut v8::HandleScope,
+pub fn op_ffi_call_ptr(
+  scope: &mut v8::PinScope<'_, '_>,
   state: Rc<RefCell<OpState>>,
   pointer: *mut c_void,
   #[serde] def: ForeignFunction,
   parameters: v8::Local<v8::Array>,
   out_buffer: Option<v8::Local<v8::TypedArray>>,
-) -> Result<FfiValue, CallError>
-where
-  FP: FfiPermissions + 'static,
-{
+) -> Result<FfiValue, CallError> {
   {
     let mut state = state.borrow_mut();
-    let permissions = state.borrow_mut::<FP>();
-    permissions.check_partial_no_path()?;
+    let permissions = state.borrow_mut::<PermissionsContainer>();
+    permissions.check_ffi_partial_no_path()?;
   };
 
   let symbol = PtrSymbol::new(pointer, &def)?;

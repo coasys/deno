@@ -9,10 +9,10 @@ A proc_macro for Deno's Node-API implementation. It does the following things:
 - Maps `deno_napi::Result` to raw `napi_result`.
 
 ```rust
-use deno_napi::napi_value;
 use deno_napi::Env;
 use deno_napi::Error;
 use deno_napi::Result;
+use deno_napi::napi_value;
 
 #[napi_sym::napi_sym]
 fn napi_get_boolean(
@@ -32,7 +32,7 @@ A file containing the symbols that need to be put into the executable's dynamic
 symbol table at link-time.
 
 This is done using `/DEF:` on Windows, `-exported_symbol,_` on macOS and
-`--export-dynamic-symbol=` on Linux. See [`cli/build.rs`](../build.rs).
+`--export-dynamic-symbol=` on Linux. See [`ext/napi/build.rs`](../build.rs).
 
 On Windows, you need to generate the `.def` file by running
-[`tools/napi/generate_symbols_lists.js`](../../tools/napi/generate_symbols_lists.js).
+[`tools/napi/generate_symbols_lists.js`](../../../tools/napi/generate_symbols_lists.js).

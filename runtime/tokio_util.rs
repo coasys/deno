@@ -1,4 +1,4 @@
-// Copyright 2018-2025 the Deno authors. MIT license.
+// Copyright 2018-2026 the Deno authors. MIT license.
 use std::fmt::Debug;
 use std::str::FromStr;
 
@@ -38,6 +38,16 @@ pub fn create_basic_runtime() -> tokio::runtime::Runtime {
       "DENO_TOKIO_MAX_IO_EVENTS_PER_TICK",
       max_io_events_per_tick,
     ))
+    // Stack size for the blocking pool only — this is a current_thread
+    // runtime, so JS/V8 always runs on the thread that calls `block_on`, not
+    // on a pool thread. In debug builds, blocking tasks (like swc
+    // parsing/emitting via spawn_blocking) can overflow the default 2MB thread
+    // stack due to unoptimized stack frames, so give them 8MB there.
+    .thread_stack_size(if cfg!(debug_assertions) {
+      8 * 1024 * 1024
+    } else {
+      2 * 1024 * 1024
+    })
     // This limits the number of threads for blocking operations (like for
     // synchronous fs ops) or CPU bound tasks like when we run dprint in
     // parallel for deno fmt.
@@ -72,11 +82,11 @@ where
   // function #[inline(always)] to avoid holding the unboxed, unused future on the stack.
 
   #[cfg(debug_assertions)]
-  // SAFETY: this this is guaranteed to be running on a current-thread executor
+  // SAFETY: this is guaranteed to be running on a current-thread executor
   let future = Box::pin(unsafe { MaskFutureAsSend::new(future) });
 
   #[cfg(not(debug_assertions))]
-  // SAFETY: this this is guaranteed to be running on a current-thread executor
+  // SAFETY: this is guaranteed to be running on a current-thread executor
   let future = unsafe { MaskFutureAsSend::new(future) };
 
   #[cfg(tokio_unstable)]
@@ -89,7 +99,10 @@ where
       let handle = tokio::runtime::Handle::current();
       let runtime_monitor = RuntimeMonitor::new(&handle);
       tokio::spawn(async move {
-        #[allow(clippy::print_stderr)]
+        #[allow(
+          clippy::print_stderr,
+          reason = "we actually want to output here"
+        )]
         for interval in runtime_monitor.intervals() {
           eprintln!("{:#?}", interval);
           // wait 500ms

@@ -1,23 +1,22 @@
-// Copyright 2018-2025 the Deno authors. MIT license.
+// Copyright 2018-2026 the Deno authors. MIT license.
 
 use std::cell::RefCell;
-use std::marker::PhantomData;
 use std::rc::Rc;
 use std::sync::Arc;
 
 use anyhow::Context;
 use async_trait::async_trait;
 use bytes::Bytes;
-use deno_core::futures::Stream;
 use deno_core::OpState;
+use deno_core::futures::Stream;
 use deno_error::JsErrorBox;
-use deno_fetch::create_http_client;
 use deno_fetch::CreateHttpClientOptions;
-use deno_permissions::PermissionCheckError;
-use deno_tls::rustls::RootCertStore;
+use deno_fetch::create_http_client;
+use deno_permissions::PermissionsContainer;
 use deno_tls::Proxy;
 use deno_tls::RootCertStoreProvider;
 use deno_tls::TlsKeys;
+use deno_tls::rustls::RootCertStore;
 use denokv_remote::MetadataEndpoint;
 use denokv_remote::Remote;
 use denokv_remote::RemoteResponse;
@@ -45,65 +44,32 @@ impl HttpOptions {
   }
 }
 
-pub trait RemoteDbHandlerPermissions {
-  fn check_env(&mut self, var: &str) -> Result<(), PermissionCheckError>;
-  fn check_net_url(
-    &mut self,
-    url: &Url,
-    api_name: &str,
-  ) -> Result<(), PermissionCheckError>;
-}
-
-impl RemoteDbHandlerPermissions for deno_permissions::PermissionsContainer {
-  #[inline(always)]
-  fn check_env(&mut self, var: &str) -> Result<(), PermissionCheckError> {
-    deno_permissions::PermissionsContainer::check_env(self, var)
-  }
-
-  #[inline(always)]
-  fn check_net_url(
-    &mut self,
-    url: &Url,
-    api_name: &str,
-  ) -> Result<(), PermissionCheckError> {
-    deno_permissions::PermissionsContainer::check_net_url(self, url, api_name)
-  }
-}
-
-pub struct RemoteDbHandler<P: RemoteDbHandlerPermissions + 'static> {
+pub struct RemoteDbHandler {
   http_options: HttpOptions,
-  _p: std::marker::PhantomData<P>,
 }
 
-impl<P: RemoteDbHandlerPermissions> RemoteDbHandler<P> {
+impl RemoteDbHandler {
   pub fn new(http_options: HttpOptions) -> Self {
-    Self {
-      http_options,
-      _p: PhantomData,
-    }
+    Self { http_options }
   }
 }
 
-pub struct PermissionChecker<P: RemoteDbHandlerPermissions> {
+pub struct PermissionChecker {
   state: Rc<RefCell<OpState>>,
-  _permissions: PhantomData<P>,
 }
 
-impl<P: RemoteDbHandlerPermissions> Clone for PermissionChecker<P> {
+impl Clone for PermissionChecker {
   fn clone(&self) -> Self {
     Self {
       state: self.state.clone(),
-      _permissions: PhantomData,
     }
   }
 }
 
-impl<P: RemoteDbHandlerPermissions + 'static> denokv_remote::RemotePermissions
-  for PermissionChecker<P>
-{
+impl denokv_remote::RemotePermissions for PermissionChecker {
   fn check_net_url(&self, url: &Url) -> Result<(), JsErrorBox> {
     let mut state = self.state.borrow_mut();
-    let permissions = state.borrow_mut::<P>();
+    let permissions = state.borrow_mut::<PermissionsContainer>();
     permissions
       .check_net_url(url, "Deno.openKv")
       .map_err(JsErrorBox::from_err)
@@ -162,10 +128,8 @@ impl RemoteResponse for FetchResponse {
 }
 
 #[async_trait(?Send)]
-impl<P: RemoteDbHandlerPermissions + 'static> DatabaseHandler
-  for RemoteDbHandler<P>
-{
-  type DB = Remote<PermissionChecker<P>, FetchClient>;
+impl DatabaseHandler for RemoteDbHandler {
+  type DB = Remote<PermissionChecker, FetchClient>;
 
   async fn open(
     &self,
@@ -187,7 +151,7 @@ impl<P: RemoteDbHandlerPermissions + 'static> DatabaseHandler
 
     {
       let mut state = state.borrow_mut();
-      let permissions = state.borrow_mut::<P>();
+      let permissions = state.borrow_mut::<PermissionsContainer>();
       permissions
         .check_env(ENV_VAR_NAME)
         .map_err(JsErrorBox::from_err)?;
@@ -199,7 +163,7 @@ impl<P: RemoteDbHandlerPermissions + 'static> DatabaseHandler
     let access_token = std::env::var(ENV_VAR_NAME)
       .map_err(anyhow::Error::from)
       .with_context(|| {
-        "Missing DENO_KV_ACCESS_TOKEN environment variable. Please set it to your access token from https://dash.deno.com/account."
+        "Missing DENO_KV_ACCESS_TOKEN environment variable. Please set it to your access token from https://console.deno.com"
       }).map_err(|e| JsErrorBox::generic(e.to_string()))?;
 
     let metadata_endpoint = MetadataEndpoint {
@@ -215,6 +179,7 @@ impl<P: RemoteDbHandlerPermissions + 'static> DatabaseHandler
         ca_certs: vec![],
         proxy: options.proxy.clone(),
         dns_resolver: Default::default(),
+        permissions: None,
         unsafely_ignore_certificate_errors: options
           .unsafely_ignore_certificate_errors
           .clone(),
@@ -229,6 +194,7 @@ impl<P: RemoteDbHandlerPermissions + 'static> DatabaseHandler
         http2: true,
         local_address: None,
         client_builder_hook: None,
+        http2_max_header_list_size: None,
       },
     )
     .map_err(JsErrorBox::from_err)?;
@@ -236,11 +202,139 @@ impl<P: RemoteDbHandlerPermissions + 'static> DatabaseHandler
 
     let permissions = PermissionChecker {
       state: state.clone(),
-      _permissions: PhantomData,
     };
+
+    // Eagerly validate that the URL points at a real Deno KV database before
+    // returning the connection. Without this, `Deno.openKv("https://invalid")`
+    // succeeds and only fails later — with an opaque error — when the
+    // connection is first used (or hangs indefinitely on a network error).
+    // See https://github.com/denoland/deno/issues/22248.
+    validate_metadata_endpoint(&fetch_client, &metadata_endpoint).await?;
 
     let remote = Remote::new(fetch_client, permissions, metadata_endpoint);
 
     Ok(remote)
   }
+}
+
+/// The KV Connect protocol versions this build understands.
+///
+/// Duplicated from `denokv_remote`'s internal metadata exchange — see the TODO
+/// on [`validate_metadata_endpoint`].
+const SUPPORTED_PROTOCOL_VERSIONS: [u64; 3] = [1, 2, 3];
+
+/// How long to wait for the metadata endpoint to respond before giving up, so
+/// that a black-holing endpoint fails `Deno.openKv` fast instead of hanging
+/// indefinitely. See https://github.com/denoland/deno/issues/22248.
+const METADATA_VALIDATION_TIMEOUT: std::time::Duration =
+  std::time::Duration::from_secs(30);
+
+/// Fetches the KV Connect metadata endpoint and verifies that the response is a
+/// valid Deno KV database metadata document, so that an invalid URL fails fast
+/// at `Deno.openKv` time with a clear error message instead of succeeding and
+/// then failing — opaquely, or by hanging — on first use.
+///
+/// Note that, unlike `denokv_remote`'s refresher (which retries 5xx/network
+/// errors with backoff and only treats 4xx as fatal), every failure here is
+/// fatal at open time. That is the behavior #22248 asks for, but it does mean a
+/// momentary blip while the endpoint is unreachable now fails `openKv` instead
+/// of being retried transparently.
+///
+/// TODO(https://github.com/denoland/deno/issues/22248): this re-implements the
+/// metadata exchange that `denokv_remote` already performs internally, so a
+/// successful `openKv` now POSTs to the metadata endpoint twice (once here, then
+/// again from `Remote::new`'s refresher task, issuing two tokens), and the
+/// `SUPPORTED_PROTOCOL_VERSIONS` / `MetadataExchangeRequest` protocol constants
+/// are duplicated from `denokv_remote` and will drift from its internals on
+/// future bumps. The better long-term fix is to expose `fetch_metadata()` (or a
+/// `Remote::new_validated()` that seeds the refresher) upstream in denokv and
+/// validate through that.
+async fn validate_metadata_endpoint(
+  client: &FetchClient,
+  metadata_endpoint: &MetadataEndpoint,
+) -> Result<(), JsErrorBox> {
+  use denokv_proto::DatabaseMetadata;
+  use denokv_proto::MetadataExchangeRequest;
+
+  let url = &metadata_endpoint.url;
+  let body = serde_json::to_vec(&MetadataExchangeRequest {
+    supported_versions: SUPPORTED_PROTOCOL_VERSIONS.to_vec(),
+  })
+  .unwrap();
+
+  let post = client.post(url.clone(), metadata_endpoint.headers(), body.into());
+  let (_, status, res) =
+    match tokio::time::timeout(METADATA_VALIDATION_TIMEOUT, post).await {
+      Ok(result) => result.map_err(|err| {
+        JsErrorBox::type_error(format!(
+          "Could not open Deno KV database: failed to connect to '{url}': {err}"
+        ))
+      })?,
+      Err(_) => {
+        return Err(JsErrorBox::type_error(format!(
+          "Could not open Deno KV database: timed out connecting to the \
+           metadata endpoint at '{url}' after {} seconds",
+          METADATA_VALIDATION_TIMEOUT.as_secs()
+        )));
+      }
+    };
+
+  // Mirror `denokv_remote`, which accepts only an exact `200 OK`, so that a
+  // `204 No Content` (or any other 2xx with no metadata body) is reported as a
+  // bad status rather than falling through to a confusing parse error.
+  if status != http::StatusCode::OK {
+    let body = res.text().await.unwrap_or_default();
+    let body = body.trim();
+    let detail = if body.is_empty() {
+      String::new()
+    } else {
+      format!(": {}", body.chars().take(512).collect::<String>())
+    };
+    return Err(JsErrorBox::type_error(format!(
+      "Could not open Deno KV database: the metadata endpoint at '{url}' \
+       responded with status {status}{detail}"
+    )));
+  }
+
+  let body = res.text().await.map_err(|err| {
+    JsErrorBox::type_error(format!(
+      "Could not open Deno KV database: failed to read the metadata response \
+       from '{url}': {err}"
+    ))
+  })?;
+
+  // Mirror `denokv_remote::parse_metadata`: read the `version` field on its own
+  // first so an unsupported version is reported as such, *before* deserializing
+  // the full `DatabaseMetadata`. The full struct's required shape is
+  // version-specific, so parsing it first would mask an unsupported version
+  // behind a generic "not a valid KV Connect endpoint" error.
+  #[derive(serde::Deserialize)]
+  struct MetadataVersion {
+    version: u64,
+  }
+
+  let version = serde_json::from_str::<MetadataVersion>(&body)
+    .map_err(|err| {
+      JsErrorBox::type_error(format!(
+        "Could not open Deno KV database: '{url}' is not a valid KV Connect \
+         endpoint (failed to read the metadata version: {err})"
+      ))
+    })?
+    .version;
+
+  if !SUPPORTED_PROTOCOL_VERSIONS.contains(&version) {
+    return Err(JsErrorBox::type_error(format!(
+      "Could not open Deno KV database: '{url}' reported unsupported KV \
+       Connect metadata version {version}"
+    )));
+  }
+
+  serde_json::from_str::<DatabaseMetadata>(&body).map_err(|err| {
+    JsErrorBox::type_error(format!(
+      "Could not open Deno KV database: '{url}' is not a valid KV Connect \
+       endpoint (failed to parse metadata response: {err})"
+    ))
+  })?;
+
+  Ok(())
 }

@@ -1,4 +1,4 @@
-// Copyright 2018-2025 the Deno authors. MIT license.
+// Copyright 2018-2026 the Deno authors. MIT license.
 
 // The logic of this module is heavily influenced by
 // https://github.com/microsoft/vscode/blob/main/extensions/typescript-language-features/src/languageFeatures/refactor.ts
@@ -130,6 +130,20 @@ pub static REWRITE_PROPERTY_GENERATEACCESSORS: Lazy<RefactorCodeActionKind> =
     }),
   });
 
+pub static INFER_FUNCTION_RETURN_TYPE: Lazy<RefactorCodeActionKind> =
+  Lazy::new(|| RefactorCodeActionKind {
+    kind: [
+      lsp::CodeActionKind::REFACTOR_REWRITE.as_str(),
+      "function",
+      "returnType",
+    ]
+    .join(".")
+    .into(),
+    matches_callback: Box::new(|tag: &str| {
+      tag.starts_with("Infer function return type")
+    }),
+  });
+
 pub static ALL_KNOWN_REFACTOR_ACTION_KINDS: Lazy<
   Vec<&'static RefactorCodeActionKind>,
 > = Lazy::new(|| {
@@ -144,6 +158,7 @@ pub static ALL_KNOWN_REFACTOR_ACTION_KINDS: Lazy<
     &REWRITE_ARROW_BRACES,
     &REWRITE_PARAMETERS_TO_DESTRUCTURED,
     &REWRITE_PROPERTY_GENERATEACCESSORS,
+    &INFER_FUNCTION_RETURN_TYPE,
   ]
 });
 
@@ -157,7 +172,7 @@ pub struct RefactorCodeActionData {
 }
 
 pub fn prune_invalid_actions(
-  actions: Vec<lsp::CodeAction>,
+  actions: impl Iterator<Item = lsp::CodeAction>,
   number_of_invalid: usize,
 ) -> Vec<lsp::CodeAction> {
   let mut available_actions = Vec::<lsp::CodeAction>::new();

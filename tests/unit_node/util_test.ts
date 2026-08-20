@@ -1,4 +1,4 @@
-// Copyright 2018-2025 the Deno authors. MIT license.
+// Copyright 2018-2026 the Deno authors. MIT license.
 
 import {
   assert,
@@ -10,6 +10,7 @@ import { stripAnsiCode } from "@std/fmt/colors";
 import * as util from "node:util";
 import utilDefault from "node:util";
 import { Buffer } from "node:buffer";
+import process from "node:process";
 
 Deno.test({
   name: "[util] format",
@@ -45,168 +46,26 @@ Deno.test({
 });
 
 Deno.test({
-  name: "[util] isBoolean",
+  // https://github.com/denoland/deno/issues/26355
+  name: "[util] inspect on Proxy doesn't invoke traps",
   fn() {
-    assert(util.isBoolean(true));
-    assert(!util.isBoolean(new Boolean()));
-    assert(!util.isBoolean(new Boolean(true)));
-    assert(util.isBoolean(false));
-    assert(!util.isBoolean("deno"));
-    assert(!util.isBoolean("true"));
-  },
-});
-
-Deno.test({
-  name: "[util] isNull",
-  fn() {
-    let n;
-    assert(util.isNull(null));
-    assert(!util.isNull(n));
-    assert(!util.isNull(0));
-    assert(!util.isNull({}));
-  },
-});
-
-Deno.test({
-  name: "[util] isNullOrUndefined",
-  fn() {
-    let n;
-    assert(util.isNullOrUndefined(null));
-    assert(util.isNullOrUndefined(n));
-    assert(!util.isNullOrUndefined({}));
-    assert(!util.isNullOrUndefined("undefined"));
-  },
-});
-
-Deno.test({
-  name: "[util] isNumber",
-  fn() {
-    assert(util.isNumber(666));
-    assert(!util.isNumber(new Number(666)));
-    assert(!util.isNumber("999"));
-    assert(!util.isNumber(null));
-  },
-});
-
-Deno.test({
-  name: "[util] isString",
-  fn() {
-    assert(util.isString("deno"));
-    assert(!util.isString(new String("DIO")));
-    assert(!util.isString(1337));
-  },
-});
-
-Deno.test({
-  name: "[util] isSymbol",
-  fn() {
-    assert(util.isSymbol(Symbol()));
-    assert(!util.isSymbol(Object(Symbol())));
-    assert(!util.isSymbol(123));
-    assert(!util.isSymbol("string"));
-  },
-});
-
-Deno.test({
-  name: "[util] isUndefined",
-  fn() {
-    let t;
-    assert(util.isUndefined(t));
-    assert(!util.isUndefined("undefined"));
-    assert(!util.isUndefined({}));
-  },
-});
-
-Deno.test({
-  name: "[util] isObject",
-  fn() {
-    const dio = { stand: "Za Warudo" };
-    assert(util.isObject(dio));
-    assert(util.isObject(new RegExp(/Toki Wo Tomare/)));
-    assert(!util.isObject("Jotaro"));
-  },
-});
-
-Deno.test({
-  name: "[util] isError",
-  fn() {
-    const java = new Error();
-    const nodejs = Reflect.construct(Error, [], Object);
-    const bun = new DOMException();
-    const deno = "Future";
-    assert(util.isError(java));
-    assert(util.isError(nodejs));
-    assert(util.isError(bun));
-    assert(!util.isError(deno));
-  },
-});
-
-Deno.test({
-  name: "[util] isFunction",
-  fn() {
-    const f = function () {};
-    assert(util.isFunction(f));
-    assert(!util.isFunction({}));
-    assert(!util.isFunction(new RegExp(/f/)));
-  },
-});
-
-Deno.test({
-  name: "[util] isRegExp",
-  fn() {
-    assert(util.isRegExp(new RegExp(/f/)));
-    assert(util.isRegExp(/fuManchu/));
-    assert(!util.isRegExp({ evil: "eye" }));
-    assert(!util.isRegExp(null));
-  },
-});
-
-Deno.test({
-  name: "[util] isArray",
-  fn() {
-    assert(util.isArray([]));
-    assert(!util.isArray({ yaNo: "array" }));
-    assert(!util.isArray(null));
-  },
-});
-
-Deno.test({
-  name: "[util] isPrimitive",
-  fn() {
-    const stringType = "hasti";
-    const booleanType = true;
-    const integerType = 2;
-    const symbolType = Symbol("anything");
-
-    const functionType = function doBest() {};
-    const objectType = { name: "ali" };
-    const arrayType = [1, 2, 3];
-
-    assert(util.isPrimitive(stringType));
-    assert(util.isPrimitive(booleanType));
-    assert(util.isPrimitive(integerType));
-    assert(util.isPrimitive(symbolType));
-    assert(util.isPrimitive(null));
-    assert(util.isPrimitive(undefined));
-    assert(!util.isPrimitive(functionType));
-    assert(!util.isPrimitive(arrayType));
-    assert(!util.isPrimitive(objectType));
-  },
-});
-
-Deno.test({
-  name: "[util] isDate",
-  fn() {
-    // Test verifies the method is exposed. See _util/_util_types_test for details
-    assert(util.isDate(new Date()));
-  },
-});
-
-Deno.test({
-  name: "[util] isBuffer",
-  fn() {
-    assert(util.isBuffer(new Buffer(4)));
-    assert(!util.isBuffer(new Uint8Array(4)));
+    assertEquals(
+      stripAnsiCode(util.inspect(
+        // deno-lint-ignore no-explicit-any
+        new Proxy({ x: 1 }, { ownKeys: (() => undefined) as any }),
+      )),
+      "{ x: 1 }",
+    );
+    assertEquals(
+      stripAnsiCode(util.inspect(
+        new Proxy({}, {
+          get() {
+            throw new Error("should not be invoked");
+          },
+        }),
+      )),
+      "{}",
+    );
   },
 });
 
@@ -287,6 +146,45 @@ Deno.test({
 });
 
 Deno.test({
+  name: "[util] getSystemErrorMessage()",
+  fn() {
+    type FnTestInvalidArg = (code?: unknown) => void;
+
+    assertThrows(
+      () => (util.getSystemErrorMessage as FnTestInvalidArg)(),
+      TypeError,
+    );
+    assertThrows(
+      () => (util.getSystemErrorMessage as FnTestInvalidArg)(1),
+      RangeError,
+    );
+
+    assertStrictEquals(util.getSystemErrorMessage(-424242), undefined);
+
+    switch (Deno.build.os) {
+      case "windows":
+        assertStrictEquals(
+          util.getSystemErrorMessage(-4091),
+          "address already in use",
+        );
+        break;
+      case "darwin":
+        assertStrictEquals(
+          util.getSystemErrorMessage(-48),
+          "address already in use",
+        );
+        break;
+      case "linux":
+        assertStrictEquals(
+          util.getSystemErrorMessage(-98),
+          "address already in use",
+        );
+        break;
+    }
+  },
+});
+
+Deno.test({
   name: "[util] deprecate() works",
   fn() {
     const fn = util.deprecate(() => {}, "foo");
@@ -349,12 +247,189 @@ Deno.test("[util] aborted()", async () => {
   assertEquals(done, true);
 });
 
+Deno.test("[util] aborted() drops pending promise when resource is GCed", async () => {
+  const command = new Deno.Command(Deno.execPath(), {
+    args: [
+      "run",
+      "--quiet",
+      "--v8-flags=--expose-gc",
+      "tests/unit_node/testdata/util_aborted_gc.ts",
+    ],
+    stdout: "piped",
+    stderr: "piped",
+  });
+  const { code, stderr } = await command.output();
+  assertEquals(code, 0, new TextDecoder().decode(stderr));
+});
+
 Deno.test("[util] styleText()", () => {
-  const redText = util.styleText("red", "error");
+  const redText = util.styleText("red", "error", { validateStream: false });
   assertEquals(redText, "\x1B[31merror\x1B[39m");
 });
 
 Deno.test("[util] styleText() with array of formats", () => {
-  const colored = util.styleText(["red", "green"], "error");
-  assertEquals(colored, "\x1b[32m\x1b[31merror\x1b[39m\x1b[39m");
+  const colored = util.styleText(["red", "green"], "error", {
+    validateStream: false,
+  });
+  assertEquals(colored, "\x1b[31m\x1b[32merror\x1b[39m\x1b[39m");
+});
+
+Deno.test("[util] styleText() respects stream.isTTY", () => {
+  const streamTTY = {
+    write() {},
+    isTTY: true,
+  } as unknown as NodeJS.WritableStream;
+  const streamNoTTY = {
+    write() {},
+    isTTY: false,
+  } as unknown as NodeJS.WritableStream;
+
+  const redText = util.styleText("red", "TTY", { stream: streamTTY });
+  assertEquals(redText, "\x1b[31mTTY\x1b[39m");
+
+  const plainText = util.styleText("blue", "No TTY", { stream: streamNoTTY });
+  const greenText = util.styleText("green", "No TTY", {
+    stream: streamNoTTY,
+    validateStream: false,
+  });
+  assertEquals(plainText, "No TTY");
+  assertEquals(greenText, "\x1b[32mNo TTY\x1b[39m");
+});
+
+Deno.test("[util] styleText() falls back to process.stdout when no stream given", () => {
+  const orig = process.env.FORCE_COLOR;
+  try {
+    process.env.FORCE_COLOR = "0";
+    assertEquals(util.styleText("red", "no stream"), "no stream");
+
+    process.env.FORCE_COLOR = "1";
+    assertEquals(
+      util.styleText("red", "no stream"),
+      "\x1b[31mno stream\x1b[39m",
+    );
+  } finally {
+    if (orig === undefined) {
+      delete process.env.FORCE_COLOR;
+    } else {
+      process.env.FORCE_COLOR = orig;
+    }
+  }
+});
+
+Deno.test("[util] styleText() validates stream type before format", () => {
+  // When both the stream and the format are invalid, ERR_INVALID_ARG_TYPE
+  // (bad stream) must be thrown before ERR_INVALID_ARG_VALUE (bad format),
+  // matching Node's argument-validation order.
+  const streamErr = assertThrows(
+    () =>
+      // @ts-expect-error: intentionally invalid format and stream to test validation order
+      util.styleText("not_a_valid_format", "text", { stream: "not-a-stream" }),
+    TypeError,
+  );
+  assertEquals(
+    (streamErr as unknown as { code: string }).code,
+    "ERR_INVALID_ARG_TYPE",
+  );
+
+  // With a structurally-valid stream (has .write), the format check fires next
+  // and ERR_INVALID_ARG_VALUE is thrown.
+  const formatErr = assertThrows(
+    () =>
+      // @ts-expect-error: intentionally invalid format to test validation order
+      util.styleText("not_a_valid_format", "text", { stream: { write() {} } }),
+    TypeError,
+  );
+  assertEquals(
+    (formatErr as unknown as { code: string }).code,
+    "ERR_INVALID_ARG_VALUE",
+  );
+});
+
+Deno.test("[util] stripVTControlCharacters() removes OSC 8 hyperlinks", () => {
+  // OSC 8 hyperlink with ESC \ (ST) terminator
+  const input =
+    "\x1b]8;;http://example.com\x1b\\This is a link\x1b]8;;\x1b\\ hello";
+  assertEquals(util.stripVTControlCharacters(input), "This is a link hello");
+
+  // OSC 8 hyperlink with BEL terminator
+  const inputBel =
+    "\x1b]8;;http://example.com\x07This is a link\x1b]8;;\x07 hello";
+  assertEquals(util.stripVTControlCharacters(inputBel), "This is a link hello");
+});
+
+Deno.test("[util] queryObjects() counts instances", () => {
+  class UtilQueryObjectsFixture {}
+  // util.queryObjects is not declared on the bundled @types/node yet, but the
+  // runtime exposes it (mirroring v8.queryObjects).
+  // deno-lint-ignore no-explicit-any
+  const queryObjects = (util as any).queryObjects as (
+    ctor: unknown,
+    options?: { format?: "count" | "summary" },
+  ) => number | string[];
+  const before = queryObjects(UtilQueryObjectsFixture, { format: "count" });
+  const refs = [];
+  for (let i = 0; i < 25; i++) refs.push(new UtilQueryObjectsFixture());
+  const after = queryObjects(UtilQueryObjectsFixture, { format: "count" });
+  assertEquals(typeof before, "number");
+  assertEquals((after as number) - (before as number) >= 25, true);
+  assertEquals(refs.length, 25);
+});
+
+Deno.test("[util] parseEnv()", () => {
+  const env =
+    "KEY1=VALUE1\nKEY2='VALUE2'\nKEYÄ3=\"VALUE3\"\nKEY4=VALÜE4\nKEY5='VALUE6'INVALID_LINE\nKEY6=A";
+  const parsed = util.parseEnv(env);
+  assertEquals(parsed, {
+    KEY1: "VALUE1",
+    KEY2: "VALUE2",
+    KEYÄ3: "VALUE3",
+    KEY4: "VALÜE4",
+    KEY5: "VALUE6",
+    KEY6: "A",
+  });
+});
+
+Deno.test("[util] getSystemErrorMap()", () => {
+  const map = util.getSystemErrorMap();
+  assert(map instanceof Map);
+  // The map must agree with getSystemErrorName / getSystemErrorMessage on
+  // every entry it returns.
+  for (const [code, [name, message]] of map) {
+    assertStrictEquals(util.getSystemErrorName(code), name);
+    assertStrictEquals(util.getSystemErrorMessage(code), message);
+  }
+  // Smoke-check a couple of well-known platform-independent codes.
+  const eaddrinuse = Deno.build.os === "windows" ? -4091 : -98;
+  if (Deno.build.os === "darwin") {
+    assertStrictEquals(map.get(-48)?.[0], "EADDRINUSE");
+  } else {
+    assertStrictEquals(map.get(eaddrinuse)?.[0], "EADDRINUSE");
+  }
+});
+
+Deno.test("[util] transferableAbortController() returns an AbortController", () => {
+  const ac = util.transferableAbortController();
+  assert(ac instanceof AbortController);
+  assert(ac.signal instanceof AbortSignal);
+  assertEquals(ac.signal.aborted, false);
+  ac.abort("reason");
+  assertEquals(ac.signal.aborted, true);
+  assertEquals(ac.signal.reason, "reason");
+});
+
+Deno.test("[util] transferableAbortSignal() returns the given signal", () => {
+  const ac = new AbortController();
+  assertStrictEquals(util.transferableAbortSignal(ac.signal), ac.signal);
+  // Also accepts already-aborted signals.
+  const aborted = AbortSignal.abort("boom");
+  assertStrictEquals(util.transferableAbortSignal(aborted), aborted);
+});
+
+Deno.test("[util] transferableAbortSignal() throws on non-AbortSignal", () => {
+  // deno-lint-ignore no-explicit-any
+  const fn = util.transferableAbortSignal as (signal: any) => unknown;
+  assertThrows(() => fn(undefined), TypeError);
+  assertThrows(() => fn(null), TypeError);
+  assertThrows(() => fn({}), TypeError);
+  assertThrows(() => fn("signal"), TypeError);
 });

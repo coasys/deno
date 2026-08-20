@@ -1,8 +1,11 @@
-// Copyright 2018-2025 the Deno authors. MIT license.
+// Copyright 2018-2026 the Deno authors. MIT license.
+
+use std::io::IsTerminal;
 
 use super::common;
 use super::fmt::to_relative_path_or_remote_url;
 use super::*;
+use crate::util::console::filter_destructive_ansi;
 
 pub struct PrettyTestReporter {
   parallel: bool,
@@ -16,8 +19,16 @@ pub struct PrettyTestReporter {
   did_have_user_output: bool,
   started_tests: bool,
   ended_tests: bool,
-  child_results_buffer:
-    HashMap<usize, IndexMap<usize, (TestStepDescription, TestStepResult, u64)>>,
+  child_results_buffer: HashMap<
+    usize,
+    IndexMap<usize, (TestStepDescription, TestStepResult, Duration)>,
+  >,
+  /// Ids of tests that have been retried at least once, used to count flaky
+  /// tests (those that ultimately passed after a retry).
+  retried_tests: HashSet<usize>,
+  /// Step results buffered until the owning test produces a terminal result,
+  /// so a retried attempt's steps can be discarded rather than counted.
+  pending_step_tally: common::PendingStepTally,
   summary: TestSummary,
   writer: Box<dyn std::io::Write>,
   failure_format_options: TestFailureFormatOptions,
@@ -45,14 +56,23 @@ impl PrettyTestReporter {
       started_tests: false,
       ended_tests: false,
       child_results_buffer: Default::default(),
+      retried_tests: Default::default(),
+      pending_step_tally: Default::default(),
       summary: TestSummary::new(),
       writer: Box::new(std::io::stdout()),
       failure_format_options,
     }
   }
 
-  pub fn with_writer(self, writer: Box<dyn std::io::Write>) -> Self {
-    Self { writer, ..self }
+  /// Drops the step state buffered for a test that is about to re-run (a retry
+  /// attempt or a new repetition): the pending tally so the previous run's
+  /// steps aren't counted, and any unflushed step output so it doesn't leak
+  /// into the next run.
+  fn discard_buffered_steps(&mut self, root_id: usize) {
+    common::discard_step_results(&mut self.pending_step_tally, root_id);
+    self
+      .child_results_buffer
+      .retain(|_, steps| !steps.values().any(|(d, _, _)| d.root_id == root_id));
   }
 
   fn force_report_wait(&mut self, description: &TestDescription) {
@@ -99,11 +119,19 @@ impl PrettyTestReporter {
     &mut self,
     description: &TestStepDescription,
     result: &TestStepResult,
-    elapsed: u64,
+    elapsed: Duration,
   ) {
     self.write_output_end();
     if self.in_new_line || self.scope_test_id != Some(description.id) {
       self.force_report_step_wait(description);
+    } else if std::io::stdout().is_terminal() {
+      write!(
+        &mut self.writer,
+        "\r{}{} ...",
+        "  ".repeat(description.level),
+        description.name
+      )
+      .ok();
     }
 
     if !self.parallel {
@@ -124,17 +152,17 @@ impl PrettyTestReporter {
       TestStepResult::Ignored => colors::yellow("ignored").to_string(),
       TestStepResult::Failed(failure) => failure.format_label(),
     };
-    write!(&mut self.writer, " {}", status).ok();
-    if let TestStepResult::Failed(failure) = result {
-      if let Some(inline_summary) = failure.format_inline_summary() {
-        write!(&mut self.writer, " ({})", inline_summary).ok();
-      }
+    write!(&mut self.writer, " {status}").ok();
+    if let TestStepResult::Failed(failure) = result
+      && let Some(inline_summary) = failure.format_inline_summary()
+    {
+      write!(&mut self.writer, " ({})", inline_summary).ok();
     }
     if !matches!(result, TestStepResult::Failed(TestFailure::Incomplete)) {
       write!(
         &mut self.writer,
         " {}",
-        colors::gray(format!("({})", display::human_elapsed(elapsed.into())))
+        colors::gray(format!("({})", display::human_elapsed(elapsed)))
       )
       .ok();
     }
@@ -194,20 +222,21 @@ impl TestReporter for PrettyTestReporter {
   }
 
   fn report_wait(&mut self, description: &TestDescription) {
+    self.write_output_end();
     if !self.parallel {
       self.force_report_wait(description);
     }
     self.started_tests = true;
   }
 
-  fn report_slow(&mut self, description: &TestDescription, elapsed: u64) {
+  fn report_slow(&mut self, description: &TestDescription, elapsed: Duration) {
     writeln!(
       &mut self.writer,
       "{}",
       colors::yellow_bold(format!(
         "'{}' has been running for over {}",
         description.name,
-        colors::gray(format!("({})", display::human_elapsed(elapsed.into()))),
+        colors::gray(format!("({})", display::human_elapsed(elapsed))),
       ))
     )
     .ok();
@@ -240,18 +269,30 @@ impl TestReporter for PrettyTestReporter {
 
     // output everything to stdout in order to prevent
     // stdout and stderr racing
-    std::io::stdout().write_all(output).ok();
+    let filtered = filter_destructive_ansi(output);
+    std::io::stdout().write_all(&filtered).ok();
   }
 
   fn report_result(
     &mut self,
     description: &TestDescription,
     result: &TestResult,
-    elapsed: u64,
+    elapsed: Duration,
   ) {
+    // Commit step results from the final attempt now that the test's fate is
+    // known (results from any retried attempt were already discarded).
+    common::commit_step_results(
+      &mut self.pending_step_tally,
+      &mut self.summary,
+      description.id,
+    );
+
     match &result {
       TestResult::Ok => {
         self.summary.passed += 1;
+        if self.retried_tests.contains(&description.id) {
+          self.summary.flaky += 1;
+        }
       }
       TestResult::Ignored => {
         self.summary.ignored += 1;
@@ -275,6 +316,26 @@ impl TestReporter for PrettyTestReporter {
     self.write_output_end();
     if self.in_new_line || self.scope_test_id != Some(description.id) {
       self.force_report_wait(description);
+    } else if std::io::stdout().is_terminal() {
+      // We believe the cursor is right after "test name ...", but external
+      // output (e.g. from native addons writing directly to fd 1) may have
+      // moved it. Use \r to return to column 0 and re-write the test name
+      // so the result line is always intact. For normal tests this harmlessly
+      // overwrites the same bytes. Only do this on a real terminal — on pipes
+      // \r is a literal byte that would produce doubled output.
+      write!(&mut self.writer, "\r").ok();
+      if self.parallel {
+        write!(
+          &mut self.writer,
+          "{}",
+          colors::gray(format!(
+            "{} => ",
+            to_relative_path_or_remote_url(&self.cwd, &description.origin)
+          ))
+        )
+        .ok();
+      }
+      write!(&mut self.writer, "{} ...", description.name).ok();
     }
 
     let status = match result {
@@ -283,20 +344,56 @@ impl TestReporter for PrettyTestReporter {
       TestResult::Failed(failure) => failure.format_label(),
       TestResult::Cancelled => colors::gray("cancelled").to_string(),
     };
-    write!(&mut self.writer, " {}", status).ok();
-    if let TestResult::Failed(failure) = result {
-      if let Some(inline_summary) = failure.format_inline_summary() {
-        write!(&mut self.writer, " ({})", inline_summary).ok();
-      }
+    write!(&mut self.writer, " {status}").ok();
+    if let TestResult::Failed(failure) = result
+      && let Some(inline_summary) = failure.format_inline_summary()
+    {
+      write!(&mut self.writer, " ({})", inline_summary).ok();
     }
     writeln!(
       &mut self.writer,
       " {}",
-      colors::gray(format!("({})", display::human_elapsed(elapsed.into())))
+      colors::gray(format!("({})", display::human_elapsed(elapsed)))
     )
     .ok();
     self.in_new_line = true;
     self.scope_test_id = None;
+  }
+
+  fn report_retry(
+    &mut self,
+    description: &TestDescription,
+    attempt: u32,
+    failure: &TestFailure,
+  ) {
+    self.retried_tests.insert(description.id);
+    // Drop the failed attempt's step results so they don't count.
+    self.discard_buffered_steps(description.id);
+
+    if self.repl {
+      return;
+    }
+
+    self.write_output_end();
+    if self.in_new_line || self.scope_test_id != Some(description.id) {
+      self.force_report_wait(description);
+    }
+
+    writeln!(
+      &mut self.writer,
+      " {} {}",
+      colors::yellow(format!("retrying (attempt {} failed)", attempt + 1)),
+      colors::gray(format!("({})", failure.overview())),
+    )
+    .ok();
+    self.in_new_line = true;
+    self.scope_test_id = None;
+  }
+
+  fn report_repeat(&mut self, description: &TestDescription, _repetition: u32) {
+    // Drop the previous repetition's step results so each step is counted once,
+    // not once per repetition.
+    self.discard_buffered_steps(description.id);
   }
 
   fn report_uncaught_error(&mut self, origin: &str, error: Box<JsError>) {
@@ -332,30 +429,17 @@ impl TestReporter for PrettyTestReporter {
     &mut self,
     desc: &TestStepDescription,
     result: &TestStepResult,
-    elapsed: u64,
+    elapsed: Duration,
     tests: &IndexMap<usize, TestDescription>,
     test_steps: &IndexMap<usize, TestStepDescription>,
   ) {
-    match &result {
-      TestStepResult::Ok => {
-        self.summary.passed_steps += 1;
-      }
-      TestStepResult::Ignored => {
-        self.summary.ignored_steps += 1;
-      }
-      TestStepResult::Failed(failure) => {
-        self.summary.failed_steps += 1;
-        self.summary.failures.push((
-          TestFailureDescription {
-            id: desc.id,
-            name: common::format_test_step_ancestry(desc, tests, test_steps),
-            origin: desc.origin.clone(),
-            location: desc.location.clone(),
-          },
-          failure.clone(),
-        ))
-      }
-    }
+    common::record_step_result(
+      &mut self.pending_step_tally,
+      desc,
+      result,
+      tests,
+      test_steps,
+    );
 
     if self.parallel {
       self.write_output_end();
@@ -391,6 +475,14 @@ impl TestReporter for PrettyTestReporter {
     }
   }
 
+  fn report_snapshot_summary(&mut self, summary: &TestSnapshotSummary) {
+    self.summary.snapshots_updated += summary.updated;
+    self
+      .summary
+      .snapshots_removed
+      .extend(summary.removed.iter().cloned());
+  }
+
   fn report_summary(
     &mut self,
     elapsed: &Duration,
@@ -424,6 +516,34 @@ impl TestReporter for PrettyTestReporter {
       tests,
       test_steps,
     );
+    self.in_new_line = true;
+  }
+
+  fn report_exit(
+    &mut self,
+    exit_code: i32,
+    tests_pending: &HashSet<usize>,
+    tests: &IndexMap<usize, TestDescription>,
+    test_steps: &IndexMap<usize, TestStepDescription>,
+  ) {
+    self.write_output_end();
+    common::report_exit(
+      &mut self.writer,
+      &self.cwd,
+      exit_code,
+      tests_pending,
+      tests,
+      test_steps,
+    );
+    self.in_new_line = true;
+  }
+
+  fn report_isolate_exit(&mut self, origin: &str, exit_code: i32) {
+    self.write_output_end();
+    common::report_isolate_exit(&mut self.writer, &self.cwd, origin, exit_code);
+    if exit_code != 0 {
+      self.summary.failed += 1;
+    }
     self.in_new_line = true;
   }
 

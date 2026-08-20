@@ -1,18 +1,21 @@
 // deno-lint-ignore-file
-// Copyright 2018-2025 the Deno authors. MIT license.
+// Copyright 2018-2026 the Deno authors. MIT license.
 
-import process from "node:process";
-import { primordials } from "ext:core/mod.js";
-import imported1 from "ext:deno_node/internal/errors.ts";
-import { kEmptyObject, once } from "ext:deno_node/internal/util.mjs";
-import {
+(function () {
+const { core, primordials } = __bootstrap;
+const lazyProcess = core.createLazyLoader("node:process");
+const imported1 = core.loadExtScript("ext:deno_node/internal/errors.ts");
+const { kEmptyObject, once } = core.loadExtScript(
+  "ext:deno_node/internal/util.mjs",
+);
+const {
   validateAbortSignal,
   validateBoolean,
   validateFunction,
   validateObject,
-} from "ext:deno_node/internal/validators.mjs";
+} = core.loadExtScript("ext:deno_node/internal/validators.mjs");
 
-import {
+const {
   isClosed,
   isNodeStream,
   isReadable,
@@ -20,16 +23,19 @@ import {
   isReadableFinished,
   isReadableNodeStream,
   isReadableStream,
+  isTransformStream,
   isWritable,
   isWritableErrored,
   isWritableFinished,
   isWritableNodeStream,
   isWritableStream,
   kIsClosedPromise,
-  willEmitClose as _willEmitClose,
-} from "ext:deno_node/internal/streams/utils.js";
+  willEmitClose: _willEmitClose,
+} = core.loadExtScript("ext:deno_node/internal/streams/utils.js");
 
-import * as _mod2 from "ext:deno_node/internal/events/abort_listener.mjs";
+const _mod2 = core.loadExtScript(
+  "ext:deno_node/internal/events/abort_listener.mjs",
+);
 
 const {
   AbortError,
@@ -70,10 +76,37 @@ function eos(stream, options, callback) {
   validateFunction(callback, "callback");
   validateAbortSignal(options.signal, "options.signal");
 
+  // Capture the current async context so that the callback runs in the
+  // same AsyncLocalStorage scope that was active when eos() was called.
+  // In Node.js this happens automatically through the native AsyncWrap
+  // layer, but Deno's ops don't propagate Node-style async context.
+  const snapshot = core.getAsyncContext();
+  const originalCallback = callback;
+  callback = function (...args) {
+    const previousContext = core.getAsyncContext();
+    try {
+      core.setAsyncContext(snapshot);
+      return originalCallback.apply(this, args);
+    } finally {
+      core.setAsyncContext(previousContext);
+    }
+  };
+
   callback = once(callback);
 
   if (isReadableStream(stream) || isWritableStream(stream)) {
     return eosWeb(stream, options, callback);
+  }
+
+  // Only a genuine web TransformStream (whose `.readable` is a real
+  // ReadableStream carrying `kIsClosedPromise`) is tracked here; a loosely
+  // shaped `{ readable, writable }` object falls through to the
+  // ERR_INVALID_ARG_TYPE below rather than a cryptic property-access TypeError.
+  if (isTransformStream(stream) && isReadableStream(stream.readable)) {
+    // A web TransformStream has no `kIsClosedPromise` of its own; track its
+    // readable side, which closes once the transform's output is fully done.
+    // Used by `addAbortSignal` to clean up its abort listener.
+    return eosWeb(stream.readable, options, callback);
   }
 
   if (!isNodeStream(stream)) {
@@ -214,10 +247,10 @@ function eos(stream, options, callback) {
   stream.on("close", onclose);
 
   if (closed) {
-    process.nextTick(onclose);
+    lazyProcess().nextTick(onclose);
   } else if (wState?.errorEmitted || rState?.errorEmitted) {
     if (!willEmitClose) {
-      process.nextTick(onclosed);
+      lazyProcess().nextTick(onclosed);
     }
   } else if (
     !readable &&
@@ -225,15 +258,15 @@ function eos(stream, options, callback) {
     (writableFinished || isWritable(stream) === false) &&
     (wState == null || wState.pendingcb === undefined || wState.pendingcb === 0)
   ) {
-    process.nextTick(onclosed);
+    lazyProcess().nextTick(onclosed);
   } else if (
     !writable &&
     (!willEmitClose || isWritable(stream)) &&
     (readableFinished || isReadable(stream) === false)
   ) {
-    process.nextTick(onclosed);
+    lazyProcess().nextTick(onclosed);
   } else if ((rState && stream.req && stream.aborted)) {
-    process.nextTick(onclosed);
+    lazyProcess().nextTick(onclosed);
   }
 
   const cleanup = () => {
@@ -262,7 +295,7 @@ function eos(stream, options, callback) {
       );
     };
     if (options.signal.aborted) {
-      process.nextTick(abort);
+      lazyProcess().nextTick(abort);
     } else {
       addAbortListener ??= _mod2.addAbortListener;
       const disposable = addAbortListener(options.signal, abort);
@@ -280,6 +313,12 @@ function eos(stream, options, callback) {
 function eosWeb(stream, options, callback) {
   let isAborted = false;
   let abort = nop;
+  let disposable;
+  const cleanup = () => {
+    callback = nop;
+    disposable?.[SymbolDispose]();
+    disposable = undefined;
+  };
   if (options.signal) {
     abort = () => {
       isAborted = true;
@@ -289,20 +328,20 @@ function eosWeb(stream, options, callback) {
       );
     };
     if (options.signal.aborted) {
-      process.nextTick(abort);
+      lazyProcess().nextTick(abort);
     } else {
       addAbortListener ??= _mod2.addAbortListener;
-      const disposable = addAbortListener(options.signal, abort);
+      disposable = addAbortListener(options.signal, abort);
       const originalCallback = callback;
       callback = once((...args) => {
-        disposable[SymbolDispose]();
+        cleanup();
         originalCallback.apply(stream, args);
       });
     }
   }
   const resolverFn = (...args) => {
     if (!isAborted) {
-      process.nextTick(() => callback.apply(stream, args));
+      lazyProcess().nextTick(() => callback.apply(stream, args));
     }
   };
   PromisePrototypeThen(
@@ -310,7 +349,10 @@ function eosWeb(stream, options, callback) {
     resolverFn,
     resolverFn,
   );
-  return nop;
+  // Deno diverges from upstream, which returns `nop`, to honor the returned
+  // cleanup function contract.
+  // https://github.com/nodejs/node/pull/46205
+  return cleanup;
 }
 
 function finished(stream, opts) {
@@ -336,6 +378,9 @@ function finished(stream, opts) {
   });
 }
 
-export { finished };
-export default eos;
-export { eos };
+return {
+  finished,
+  eos,
+  default: eos,
+};
+})();

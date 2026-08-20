@@ -1,4 +1,4 @@
-// Copyright 2018-2025 the Deno authors. MIT license.
+// Copyright 2018-2026 the Deno authors. MIT license.
 
 // @ts-check
 /// <reference path="../../core/internal.d.ts" />
@@ -6,8 +6,14 @@
 /// <reference path="../web/internal.d.ts" />
 /// <reference path="../../cli/tsc/dts/lib.deno_web.d.ts" />
 
-import { core, internals, primordials } from "ext:core/mod.js";
-import { op_base64_decode, op_base64_encode } from "ext:core/ops";
+(function () {
+const { core, internals, primordials } = __bootstrap;
+const {
+  op_base64_decode,
+  op_base64_decode_into,
+  op_base64_encode,
+  op_base64_encode_from_buffer,
+} = core.ops;
 const {
   ArrayPrototypeJoin,
   ArrayPrototypeMap,
@@ -16,7 +22,6 @@ const {
   JSONStringify,
   NumberPrototypeToString,
   ObjectPrototypeIsPrototypeOf,
-  RegExpPrototypeTest,
   SafeArrayIterator,
   SafeRegExp,
   String,
@@ -25,7 +30,6 @@ const {
   StringPrototypeMatch,
   StringPrototypePadStart,
   StringPrototypeReplace,
-  StringPrototypeReplaceAll,
   StringPrototypeSlice,
   StringPrototypeSubstring,
   StringPrototypeToLowerCase,
@@ -34,7 +38,7 @@ const {
   TypeError,
 } = primordials;
 
-import { URLPrototype } from "ext:deno_url/00_url.js";
+const { URLPrototype } = core.loadExtScript("ext:deno_web/00_url.js");
 
 const ASCII_DIGIT = ["\u0030-\u0039"];
 const ASCII_UPPER_ALPHA = ["\u0041-\u005A"];
@@ -251,6 +255,16 @@ function forgivingBase64Encode(data) {
 }
 
 /**
+ * @param {Uint8Array} data
+ * @param {number} offset
+ * @param {number} length
+ * @returns {string}
+ */
+function forgivingBase64EncodeFromBuffer(data, offset, length) {
+  return op_base64_encode_from_buffer(data, offset, length);
+}
+
+/**
  * @param {string} data
  * @returns {Uint8Array}
  */
@@ -258,73 +272,14 @@ function forgivingBase64Decode(data) {
   return op_base64_decode(data);
 }
 
-// Taken from std/encoding/base64url.ts
-/*
- * Some variants allow or require omitting the padding '=' signs:
- * https://en.wikipedia.org/wiki/Base64#The_URL_applications
- * @param base64url
- */
 /**
- * @param {string} base64url
- * @returns {string}
+ * @param {string} data
+ * @param {Uint8Array} target
+ * @param {number} offset
+ * @returns {number}
  */
-function addPaddingToBase64url(base64url) {
-  if (base64url.length % 4 === 2) return base64url + "==";
-  if (base64url.length % 4 === 3) return base64url + "=";
-  if (base64url.length % 4 === 1) {
-    throw new TypeError("Illegal base64url string");
-  }
-  return base64url;
-}
-
-const BASE64URL_PATTERN = new SafeRegExp(/^[-_A-Z0-9]*?={0,2}$/i);
-
-/**
- * @param {string} base64url
- * @returns {string}
- */
-function convertBase64urlToBase64(base64url) {
-  if (!RegExpPrototypeTest(BASE64URL_PATTERN, base64url)) {
-    // Contains characters not part of base64url spec.
-    throw new TypeError("Failed to decode base64url: invalid character");
-  }
-  return StringPrototypeReplaceAll(
-    StringPrototypeReplaceAll(addPaddingToBase64url(base64url), "-", "+"),
-    "_",
-    "/",
-  );
-}
-
-/**
- * Encodes a given ArrayBuffer or string into a base64url representation
- * @param {ArrayBuffer | string} data
- * @returns {string}
- */
-function forgivingBase64UrlEncode(data) {
-  return StringPrototypeReplaceAll(
-    StringPrototypeReplaceAll(
-      StringPrototypeReplaceAll(
-        forgivingBase64Encode(
-          typeof data === "string" ? new TextEncoder().encode(data) : data,
-        ),
-        "=",
-        "",
-      ),
-      "+",
-      "-",
-    ),
-    "/",
-    "_",
-  );
-}
-
-/**
- * Converts given base64url encoded data back to original
- * @param {string} b64url
- * @returns {Uint8Array}
- */
-function forgivingBase64UrlDecode(b64url) {
-  return forgivingBase64Decode(convertBase64urlToBase64(b64url));
+function forgivingBase64DecodeInto(data, target, offset) {
+  return op_base64_decode_into(data, target, offset);
 }
 
 /**
@@ -439,14 +394,10 @@ function pathFromURL(pathOrUrl) {
 // it in unit tests
 internals.pathFromURL = pathFromURL;
 
-// deno-lint-ignore prefer-primordials
-export const SymbolDispose = Symbol.dispose;
-// deno-lint-ignore prefer-primordials
-export const SymbolAsyncDispose = Symbol.asyncDispose;
-// deno-lint-ignore prefer-primordials
-export const SymbolMetadata = Symbol.metadata ?? Symbol("Symbol.metadata");
+// deno-lint-ignore deno-internal/prefer-primordials
+const SymbolMetadata = Symbol.metadata ?? Symbol("Symbol.metadata");
 
-export {
+return {
   ASCII_ALPHA,
   ASCII_ALPHANUMERIC,
   ASCII_DIGIT,
@@ -459,9 +410,9 @@ export {
   collectHttpQuotedString,
   collectSequenceOfCodepoints,
   forgivingBase64Decode,
+  forgivingBase64DecodeInto,
   forgivingBase64Encode,
-  forgivingBase64UrlDecode,
-  forgivingBase64UrlEncode,
+  forgivingBase64EncodeFromBuffer,
   HTTP_QUOTED_STRING_TOKEN_POINT,
   HTTP_QUOTED_STRING_TOKEN_POINT_RE,
   HTTP_TAB_OR_SPACE,
@@ -476,4 +427,6 @@ export {
   pathFromURL,
   regexMatcher,
   serializeJSValueToJSONString,
+  SymbolMetadata,
 };
+})();

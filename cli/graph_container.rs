@@ -1,4 +1,4 @@
-// Copyright 2018-2025 the Deno authors. MIT license.
+// Copyright 2018-2026 the Deno authors. MIT license.
 
 use std::sync::Arc;
 
@@ -8,7 +8,6 @@ use deno_config::glob::PathOrPatternSet;
 use deno_core::error::AnyError;
 use deno_core::parking_lot::RwLock;
 use deno_graph::ModuleGraph;
-use deno_runtime::colors;
 use deno_runtime::deno_permissions::PermissionsContainer;
 
 use crate::args::CliOptions;
@@ -42,7 +41,7 @@ pub struct MainModuleGraphContainer {
   // Allow only one request to update the graph data at a time,
   // but allow other requests to read from it at any time even
   // while another request is updating the data.
-  update_queue: Arc<crate::util::sync::TaskQueue>,
+  update_queue: Arc<deno_core::unsync::sync::TaskQueue>,
   inner: Arc<RwLock<Arc<ModuleGraph>>>,
   cli_options: Arc<CliOptions>,
   module_load_preparer: Arc<ModuleLoadPreparer>,
@@ -53,6 +52,11 @@ pub struct MainModuleGraphContainer {
 pub struct CheckSpecifiersOptions<'a> {
   pub ext_overwrite: Option<&'a String>,
   pub allow_unknown_media_types: bool,
+}
+
+pub struct CollectSpecifiersOptions {
+  /// Whether to include paths that are specified even if they're ignored.
+  pub include_ignored_specified: bool,
 }
 
 impl MainModuleGraphContainer {
@@ -88,8 +92,12 @@ impl MainModuleGraphContainer {
           is_dynamic: false,
           lib: self.cli_options.ts_type_lib_window(),
           permissions: self.root_permissions.clone(),
+          file_permission_api_name: None,
           ext_overwrite: options.ext_overwrite,
           allow_unknown_media_types: options.allow_unknown_media_types,
+          skip_graph_roots_validation: false,
+          file_content_overrides: Default::default(),
+          file_header_overrides: Default::default(),
         },
       )
       .await?;
@@ -97,24 +105,10 @@ impl MainModuleGraphContainer {
     Ok(())
   }
 
-  /// Helper around prepare_module_load that loads and type checks
-  /// the provided files.
-  pub async fn load_and_type_check_files(
-    &self,
-    files: &[String],
-  ) -> Result<(), AnyError> {
-    let specifiers = self.collect_specifiers(files)?;
-
-    if specifiers.is_empty() {
-      log::warn!("{} No matching files found.", colors::yellow("Warning"));
-    }
-
-    self.check_specifiers(&specifiers, Default::default()).await
-  }
-
   pub fn collect_specifiers(
     &self,
     files: &[String],
+    options: CollectSpecifiersOptions,
   ) -> Result<Vec<ModuleSpecifier>, AnyError> {
     let excludes = self.cli_options.workspace().resolve_config_excludes()?;
     let include_patterns =
@@ -128,8 +122,14 @@ impl MainModuleGraphContainer {
       exclude: excludes,
     };
     collect_specifiers(
-      file_patterns,
-      self.cli_options.vendor_dir_path().map(ToOwned::to_owned),
+      crate::util::fs::CollectSpecifiersOptions {
+        file_patterns,
+        vendor_folder: self
+          .cli_options
+          .vendor_dir_path()
+          .map(ToOwned::to_owned),
+        include_ignored_specified: options.include_ignored_specified,
+      },
       |e| is_script_ext(e.path),
     )
   }
@@ -154,7 +154,7 @@ impl ModuleGraphContainer for MainModuleGraphContainer {
 /// everything looks fine, calling `.commit()` will store the
 /// new graph in the ModuleGraphContainer.
 pub struct MainModuleGraphUpdatePermit<'a> {
-  permit: crate::util::sync::TaskQueuePermit<'a>,
+  permit: deno_core::unsync::sync::TaskQueuePermit<'a>,
   inner: Arc<RwLock<Arc<ModuleGraph>>>,
   graph: ModuleGraph,
 }

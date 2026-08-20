@@ -1,98 +1,278 @@
-// Copyright 2018-2025 the Deno authors. MIT license.
+// Copyright 2018-2026 the Deno authors. MIT license.
 
-import { primordials } from "ext:core/mod.js";
+(function () {
+const { core, primordials } = __bootstrap;
 const {
-  MapPrototypeGet,
-  MapPrototypeDelete,
+  FunctionPrototypeBind,
+  ObjectCreate,
   ObjectDefineProperty,
   Promise,
+  PromiseReject,
+  PromiseWithResolvers,
   SafeArrayIterator,
+  SafePromisePrototypeFinally,
+  SymbolFor,
 } = primordials;
 
-import {
-  activeTimers,
+// `node:test`'s `mock.timers` installs itself here while enabled. Routing the
+// interception through a module-level hook (rather than swapping the module's
+// exports) makes every call site honor the virtual clock regardless of how it
+// reached these functions: `globalThis`, `require("node:timers")`, or a static
+// `import { setTimeout } from "node:timers/promises"` binding captured before
+// `enable()`. Node's MockTimers likewise intercepts the timers modules, not
+// just the globals. `null` means no mocking is active.
+let mockTimers = null;
+const kInstallMockTimers = SymbolFor("Deno.internal.node.mockTimers");
+const {
+  getActiveTimer,
   Immediate,
-  setUnrefTimeout,
+  kDestroy,
   Timeout,
-} from "ext:deno_node/internal/timers.mjs";
-import {
+} = core.loadExtScript("ext:deno_node/internal/timers.mjs");
+const {
   validateAbortSignal,
   validateBoolean,
   validateFunction,
+  validateNumber,
   validateObject,
-} from "ext:deno_node/internal/validators.mjs";
-import { promisify } from "ext:deno_node/internal/util.mjs";
-export { setUnrefTimeout } from "ext:deno_node/internal/timers.mjs";
-import * as timers from "ext:deno_web/02_timers.js";
-import { AbortError } from "ext:deno_node/internal/errors.ts";
+} = core.loadExtScript("ext:deno_node/internal/validators.mjs");
+const { kEmptyObject, promisify } = core.loadExtScript(
+  "ext:deno_node/internal/util.mjs",
+);
+const {
+  AbortError,
+  ERR_ILLEGAL_CONSTRUCTOR,
+  ERR_INVALID_THIS,
+} = core.loadExtScript("ext:deno_node/internal/errors.ts");
+const lazyEventTarget = core.createLazyLoader(
+  "ext:deno_node/internal/event_target.mjs",
+);
 
-const clearTimeout_ = timers.clearTimeout;
-const clearInterval_ = timers.clearInterval;
+interface TimerOptions {
+  signal?: AbortSignal | undefined;
+  ref?: boolean | undefined;
+}
 
-export function setTimeout(
+function setTimeout(
   callback: (...args: unknown[]) => void,
   timeout?: number,
   ...args: unknown[]
 ) {
   validateFunction(callback, "callback");
+  if (mockTimers !== null && mockTimers._apiEnabled("setTimeout")) {
+    return mockTimers._setTimeout(callback, timeout, args, false);
+  }
   return new Timeout(callback, timeout, args, false, true);
 }
 
+function cancelListenerHandler(
+  clear: typeof clearTimeout,
+  reject: typeof PromiseReject,
+  signal: AbortSignal | undefined,
+) {
+  if (!this._destroyed) {
+    clear(this);
+    reject(new AbortError(undefined, { cause: signal?.reason }));
+  }
+}
+
+function setTimeoutPromise<T = void>(
+  after: number | undefined,
+  value: T,
+  options: TimerOptions = kEmptyObject,
+): Promise<T> {
+  try {
+    if (typeof after !== "undefined") {
+      validateNumber(after, "delay");
+    }
+
+    validateObject(options, "options");
+
+    if (typeof options?.signal !== "undefined") {
+      validateAbortSignal(options.signal, "options.signal");
+    }
+
+    if (typeof options?.ref !== "undefined") {
+      validateBoolean(options.ref, "options.ref");
+    }
+  } catch (err) {
+    return PromiseReject(err);
+  }
+
+  const { signal, ref = true } = options;
+
+  if (signal?.aborted) {
+    return PromiseReject(new AbortError(undefined, { cause: signal.reason }));
+  }
+
+  let oncancel: EventListenerOrEventListenerObject | undefined;
+  const { promise, resolve, reject } = PromiseWithResolvers();
+  // When mocking is active the timer is driven by the virtual clock, so the
+  // promise resolves on `tick()`/`runAll()` instead of a real timer.
+  const timeout = mockTimers !== null && mockTimers._apiEnabled("setTimeout")
+    ? mockTimers._setTimeout(resolve, after, [value], false)
+    : new Timeout(resolve, after, [value], false, ref);
+  if (signal) {
+    oncancel = FunctionPrototypeBind(
+      cancelListenerHandler,
+      timeout,
+      clearTimeout,
+      reject,
+      signal,
+    );
+
+    signal.addEventListener("abort", oncancel, {
+      __proto__: null,
+      [lazyEventTarget().kResistStopPropagation]: true,
+    });
+  }
+
+  return oncancel !== undefined
+    ? SafePromisePrototypeFinally(
+      promise,
+      () => signal!.removeEventListener("abort", oncancel),
+    )
+    : promise;
+}
+
+ObjectDefineProperty(setTimeoutPromise, "name", {
+  __proto__: null,
+  value: "setTimeout",
+});
+
 ObjectDefineProperty(setTimeout, promisify.custom, {
   __proto__: null,
-  value: (timeout: number, ...args: unknown[]) => {
-    return new Promise((cb) =>
-      setTimeout(cb, timeout, ...new SafeArrayIterator(args))
-    );
-  },
   enumerable: true,
+  get() {
+    return setTimeoutPromise;
+  },
 });
-export function clearTimeout(timeout?: Timeout | number) {
+
+function clearTimeout(timeout?: Timeout | number) {
   if (timeout == null) {
     return;
   }
-  const id = +timeout;
-  const timer = MapPrototypeGet(activeTimers, id);
-  if (timer) {
-    timer._destroyed = true;
-    MapPrototypeDelete(activeTimers, id);
+  if (mockTimers !== null && mockTimers._apiEnabled("setTimeout")) {
+    mockTimers._clearTimer(timeout);
+    return;
   }
-  clearTimeout_(id);
+  const id = +timeout;
+  getActiveTimer(id)?.[kDestroy]();
 }
-export function setInterval(
+function setInterval(
   callback: (...args: unknown[]) => void,
   timeout?: number,
   ...args: unknown[]
 ) {
   validateFunction(callback, "callback");
+  if (mockTimers !== null && mockTimers._apiEnabled("setInterval")) {
+    return mockTimers._setInterval(callback, timeout, args);
+  }
   return new Timeout(callback, timeout, args, true, true);
 }
-export function clearInterval(timeout?: Timeout | number | string) {
+function clearInterval(timeout?: Timeout | number | string) {
   if (timeout == null) {
     return;
   }
-  const id = +timeout;
-  const timer = MapPrototypeGet(activeTimers, id);
-  if (timer) {
-    timer._destroyed = true;
-    MapPrototypeDelete(activeTimers, id);
+  if (mockTimers !== null && mockTimers._apiEnabled("setInterval")) {
+    mockTimers._clearTimer(timeout);
+    return;
   }
-  clearInterval_(id);
+  const id = +timeout;
+  getActiveTimer(id)?.[kDestroy]();
 }
-export function setImmediate(
+function setImmediate(
   cb: (...args: unknown[]) => void,
   ...args: unknown[]
 ): Timeout {
+  validateFunction(cb, "callback");
+  if (mockTimers !== null && mockTimers._apiEnabled("setImmediate")) {
+    return mockTimers._setTimeout(cb, 0, args, true);
+  }
   return new Immediate(cb, ...new SafeArrayIterator(args));
 }
-export function clearImmediate(immediate: Immediate) {
+
+function setImmediatePromise<T = void>(
+  value?: T,
+  options: TimerOptions = kEmptyObject,
+): Promise<T> {
+  try {
+    validateObject(options, "options");
+
+    if (typeof options?.signal !== "undefined") {
+      validateAbortSignal(options.signal, "options.signal");
+    }
+
+    if (typeof options?.ref !== "undefined") {
+      validateBoolean(options.ref, "options.ref");
+    }
+  } catch (err) {
+    return PromiseReject(err);
+  }
+
+  const { signal, ref = true } = options;
+
+  if (signal?.aborted) {
+    return PromiseReject(new AbortError(undefined, { cause: signal.reason }));
+  }
+
+  let oncancel: EventListenerOrEventListenerObject | undefined;
+  const { promise, resolve, reject } = PromiseWithResolvers();
+  const immediate =
+    mockTimers !== null && mockTimers._apiEnabled("setImmediate")
+      ? mockTimers._setTimeout(() => resolve(value), 0, [], true)
+      : new Immediate(() => resolve(value));
+  if (!ref) {
+    immediate.unref();
+  }
+  if (signal) {
+    oncancel = FunctionPrototypeBind(
+      cancelListenerHandler,
+      immediate,
+      clearImmediate,
+      reject,
+      signal,
+    );
+
+    signal.addEventListener("abort", oncancel, {
+      __proto__: null,
+      [lazyEventTarget().kResistStopPropagation]: true,
+    });
+  }
+
+  return oncancel !== undefined
+    ? SafePromisePrototypeFinally(
+      promise,
+      () => signal!.removeEventListener("abort", oncancel),
+    )
+    : promise;
+}
+
+ObjectDefineProperty(setImmediatePromise, "name", {
+  __proto__: null,
+  value: "setImmediate",
+});
+
+ObjectDefineProperty(setImmediate, promisify.custom, {
+  __proto__: null,
+  enumerable: true,
+  get() {
+    return setImmediatePromise;
+  },
+});
+
+function clearImmediate(immediate: Immediate) {
   if (immediate == null) {
     return;
   }
-
-  // FIXME(nathanwhit): will probably change once
-  //  deno_core has proper support for immediates
-  clearTimeout_(immediate._immediateId);
+  if (mockTimers !== null && mockTimers._apiEnabled("setImmediate")) {
+    mockTimers._clearTimer(immediate);
+    return;
+  }
+  if (!immediate?._onImmediate || immediate._destroyed) {
+    return;
+  }
+  core.clearImmediate(immediate);
 }
 
 async function* setIntervalAsync(
@@ -122,20 +302,17 @@ async function* setIntervalAsync(
     let notYielded = 0;
     let callback: ((value?: object) => void) | undefined = undefined;
     let rejectCallback: ((message?: string) => void) | undefined = undefined;
-    interval = new Timeout(
-      () => {
-        notYielded++;
-        if (callback) {
-          callback();
-          callback = undefined;
-          rejectCallback = undefined;
-        }
-      },
-      after,
-      [],
-      true,
-      ref,
-    );
+    const onInterval = () => {
+      notYielded++;
+      if (callback) {
+        callback();
+        callback = undefined;
+        rejectCallback = undefined;
+      }
+    };
+    interval = mockTimers !== null && mockTimers._apiEnabled("setInterval")
+      ? mockTimers._setInterval(onInterval, after, [])
+      : new Timeout(onInterval, after, [], true, ref);
     if (signal) {
       onCancel = () => {
         clearInterval(interval);
@@ -158,6 +335,7 @@ async function* setIntervalAsync(
         yield value;
       }
     }
+    throw new AbortError(undefined, { cause: signal?.reason });
   } catch (error) {
     if (signal?.aborted) {
       throw new AbortError(undefined, { cause: signal?.reason });
@@ -173,29 +351,56 @@ async function* setIntervalAsync(
   }
 }
 
-export const promises = {
-  setTimeout: promisify(setTimeout),
-  setImmediate: promisify(setImmediate),
+const promises = {
+  setTimeout: setTimeoutPromise,
+  setImmediate: setImmediatePromise,
   setInterval: setIntervalAsync,
 };
 
-promises.scheduler = {
-  async wait(
+// There is exactly one `scheduler`, so identity is the check: a
+// prototype-linked object, or one carrying whatever properties the real
+// instance has, is still a foreign receiver.
+function validateScheduler(self: unknown) {
+  if (self !== scheduler) {
+    throw new ERR_INVALID_THIS("Scheduler");
+  }
+}
+
+class Scheduler {
+  constructor() {
+    throw new ERR_ILLEGAL_CONSTRUCTOR();
+  }
+  // Not `async`: the `this` check has to reject a foreign receiver
+  // synchronously rather than returning a rejected promise.
+  wait(
     delay: number,
     options?: { signal?: AbortSignal },
   ): Promise<void> {
-    return await promises.setTimeout(delay, undefined, options);
-  },
-  yield: promises.setImmediate,
-};
+    validateScheduler(this);
+    return setTimeoutPromise(delay, undefined, options);
+  }
+  yield() {
+    validateScheduler(this);
+    return promises.setImmediate();
+  }
+}
 
-export default {
+const scheduler = ObjectCreate(Scheduler.prototype);
+promises.scheduler = scheduler;
+
+return {
   setTimeout,
   clearTimeout,
   setInterval,
   clearInterval,
   setImmediate,
-  setUnrefTimeout,
   clearImmediate,
   promises,
+  // Internal entry point for `node:test`'s `mock.timers`. Keyed by a symbol so
+  // it does not surface as a public `node:timers` export. Passing a MockTimers
+  // instance enables interception; passing `null` disables it.
+  [kInstallMockTimers]: (instance) => {
+    mockTimers = instance;
+  },
 };
+})();

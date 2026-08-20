@@ -1,4 +1,4 @@
-// Copyright 2018-2025 the Deno authors. MIT license.
+// Copyright 2018-2026 the Deno authors. MIT license.
 
 use std::net::IpAddr;
 use std::str::FromStr;
@@ -29,10 +29,18 @@ impl FromStr for BarePort {
 }
 
 pub fn validator(host_and_port: &str) -> Result<String, String> {
+  // Unix and vsock socket descriptors have their own validation with specific
+  // error messages (e.g. a unix path must be absolute). Surface those errors
+  // directly instead of masking them with the generic "Bad host:port pair".
+  if host_and_port.starts_with("unix:") || host_and_port.starts_with("vsock:") {
+    return NetDescriptor::parse_for_list(host_and_port)
+      .map(|_| host_and_port.to_string())
+      .map_err(|e| e.to_string());
+  }
   if Url::parse(&format!("internal://{host_and_port}")).is_ok()
     || host_and_port.parse::<IpAddr>().is_ok()
     || host_and_port.parse::<BarePort>().is_ok()
-    || NetDescriptor::parse(host_and_port).is_ok()
+    || NetDescriptor::parse_for_list(host_and_port).is_ok()
   {
     Ok(host_and_port.to_string())
   } else {
@@ -52,7 +60,7 @@ pub fn parse(paths: Vec<String>) -> clap::error::Result<Vec<String>> {
         out.push(format!("{}:{}", host, port.0));
       }
     } else {
-      NetDescriptor::parse(&host_and_port).map_err(|e| {
+      NetDescriptor::parse_for_list(&host_and_port).map_err(|e| {
         clap::Error::raw(clap::error::ErrorKind::InvalidValue, e.to_string())
       })?;
       out.push(host_and_port)
@@ -120,6 +128,7 @@ mod tests {
     let entries = svec![
       "deno.land",
       "deno.land:80",
+      "*.deno.land",
       "[::]",
       "[::1]",
       "127.0.0.1",
@@ -136,11 +145,15 @@ mod tests {
       "localhost:8000",
       "0.0.0.0:4545",
       "127.0.0.1:4545",
-      "999.0.88.1:80"
+      "999.0.88.1:80",
+      "127.0.0.0/24",
+      "192.168.1.0/24",
+      "10.0.0.0/8"
     ];
     let expected = svec![
       "deno.land",
       "deno.land:80",
+      "*.deno.land",
       "[::]",
       "[::1]",
       "127.0.0.1",
@@ -157,7 +170,10 @@ mod tests {
       "localhost:8000",
       "0.0.0.0:4545",
       "127.0.0.1:4545",
-      "999.0.88.1:80"
+      "999.0.88.1:80",
+      "127.0.0.0/24",
+      "192.168.1.0/24",
+      "10.0.0.0/8"
     ];
     let actual = parse(entries).unwrap();
     assert_eq!(actual, expected);

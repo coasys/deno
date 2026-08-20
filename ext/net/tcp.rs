@@ -1,7 +1,9 @@
-// Copyright 2018-2025 the Deno authors. MIT license.
+// Copyright 2018-2026 the Deno authors. MIT license.
 use std::collections::HashMap;
 use std::net::SocketAddr;
 use std::sync::Arc;
+#[cfg(test)]
+use std::sync::Barrier;
 
 use socket2::Domain;
 use socket2::Protocol;
@@ -11,6 +13,39 @@ use socket2::Type;
 /// a given local address and clone its socket for us to listen on in our thread.
 static CONNS: std::sync::OnceLock<std::sync::Mutex<Connections>> =
   std::sync::OnceLock::new();
+
+#[cfg(test)]
+type DropBarrierSlot = std::sync::Mutex<Option<(SocketAddr, Arc<Barrier>)>>;
+
+#[cfg(test)]
+static DROP_BARRIER: std::sync::OnceLock<DropBarrierSlot> =
+  std::sync::OnceLock::new();
+
+#[cfg(test)]
+struct DropBarrier(Option<Arc<Barrier>>);
+
+#[cfg(test)]
+impl DropBarrier {
+  fn for_key(key: SocketAddr) -> Self {
+    let barrier = DROP_BARRIER
+      .get_or_init(Default::default)
+      .lock()
+      .unwrap()
+      .as_ref()
+      .filter(|(barrier_key, _)| *barrier_key == key)
+      .map(|(_, barrier)| barrier.clone());
+    Self(barrier)
+  }
+}
+
+#[cfg(test)]
+impl Drop for DropBarrier {
+  fn drop(&mut self) {
+    if let Some(barrier) = &self.0 {
+      barrier.wait();
+    }
+  }
+}
 
 /// Maintains a map of listening address to `TcpConnection`.
 #[derive(Default)]
@@ -31,8 +66,8 @@ pub struct TcpConnection {
 
 impl TcpConnection {
   /// Boot a load-balanced TCP connection
-  pub fn start(key: SocketAddr) -> std::io::Result<Self> {
-    let listener = bind_socket_and_listen(key, false)?;
+  pub fn start(key: SocketAddr, backlog: i32) -> std::io::Result<Self> {
+    let listener = bind_socket_and_listen(key, false, backlog)?;
     let sock = listener.into();
 
     Ok(Self { sock, key })
@@ -78,11 +113,12 @@ impl TcpListener {
   pub fn bind(
     socket_addr: SocketAddr,
     reuse_port: bool,
+    backlog: i32,
   ) -> std::io::Result<Self> {
     if REUSE_PORT_LOAD_BALANCES && reuse_port {
-      Self::bind_load_balanced(socket_addr)
+      Self::bind_load_balanced(socket_addr, backlog)
     } else {
-      Self::bind_direct(socket_addr, reuse_port)
+      Self::bind_direct(socket_addr, reuse_port, backlog)
     }
   }
 
@@ -91,9 +127,10 @@ impl TcpListener {
   pub fn bind_direct(
     socket_addr: SocketAddr,
     reuse_port: bool,
+    backlog: i32,
   ) -> std::io::Result<Self> {
     // We ignore `reuse_port` on platforms other than Linux to match the existing behaviour.
-    let listener = bind_socket_and_listen(socket_addr, reuse_port)?;
+    let listener = bind_socket_and_listen(socket_addr, reuse_port, backlog)?;
     Ok(Self {
       listener: Some(tokio::net::TcpListener::from_std(listener)?),
       conn: None,
@@ -101,7 +138,10 @@ impl TcpListener {
   }
 
   /// Bind to the port in a load-balanced manner.
-  pub fn bind_load_balanced(socket_addr: SocketAddr) -> std::io::Result<Self> {
+  pub fn bind_load_balanced(
+    socket_addr: SocketAddr,
+    backlog: i32,
+  ) -> std::io::Result<Self> {
     let tcp = &mut CONNS.get_or_init(Default::default).lock().unwrap().tcp;
     if let Some(conn) = tcp.get(&socket_addr) {
       let listener = Some(conn.listener()?);
@@ -110,7 +150,7 @@ impl TcpListener {
         conn: Some(conn.clone()),
       });
     }
-    let conn = Arc::new(TcpConnection::start(socket_addr)?);
+    let conn = Arc::new(TcpConnection::start(socket_addr, backlog)?);
     let listener = Some(conn.listener()?);
     tcp.insert(socket_addr, conn.clone());
     Ok(Self {
@@ -135,22 +175,26 @@ impl Drop for TcpListener {
   fn drop(&mut self) {
     // If we're in load-balancing mode
     if let Some(conn) = self.conn.take() {
+      #[cfg(test)]
+      // This is declared before the mutex guard so the regression test can
+      // pause after the guard is released but before an implicit `conn` drop.
+      let _drop_barrier = DropBarrier::for_key(conn.key);
       let mut tcp = CONNS.get().unwrap().lock().unwrap();
       if Arc::strong_count(&conn) == 2 {
         tcp.tcp.remove(&conn.key);
         // Close the connection
         debug_assert_eq!(Arc::strong_count(&conn), 1);
-        drop(conn);
       }
+      drop(conn);
     }
   }
 }
 
 /// Bind a socket to an address and listen with the low-level options we need.
-#[allow(unused_variables)]
 fn bind_socket_and_listen(
   socket_addr: SocketAddr,
-  reuse_port: bool,
+  _reuse_port: bool,
+  backlog: i32,
 ) -> Result<std::net::TcpListener, std::io::Error> {
   let socket = if socket_addr.is_ipv4() {
     socket2::Socket::new(Domain::IPV4, Type::STREAM, Some(Protocol::TCP))?
@@ -158,7 +202,7 @@ fn bind_socket_and_listen(
     socket2::Socket::new(Domain::IPV6, Type::STREAM, Some(Protocol::TCP))?
   };
   #[cfg(not(windows))]
-  if REUSE_PORT_LOAD_BALANCES && reuse_port {
+  if REUSE_PORT_LOAD_BALANCES && _reuse_port {
     socket.set_reuse_port(true)?;
   }
   #[cfg(not(windows))]
@@ -170,7 +214,37 @@ fn bind_socket_and_listen(
   socket.set_reuse_address(true)?;
   socket.set_nonblocking(true)?;
   socket.bind(&socket_addr.into())?;
-  socket.listen(128)?;
+  socket.listen(backlog)?;
   let listener = socket.into();
   Ok(listener)
+}
+
+#[cfg(test)]
+mod tests {
+  use super::*;
+
+  #[tokio::test]
+  async fn concurrent_load_balanced_listener_drops_remove_connection() {
+    let listener = std::net::TcpListener::bind(("127.0.0.1", 0)).unwrap();
+    let addr = listener.local_addr().unwrap();
+    drop(listener);
+
+    let first = TcpListener::bind_load_balanced(addr, 128).unwrap();
+    let second = TcpListener::bind_load_balanced(addr, 128).unwrap();
+
+    let barrier = Arc::new(Barrier::new(2));
+    *DROP_BARRIER.get_or_init(Default::default).lock().unwrap() =
+      Some((addr, barrier));
+
+    std::thread::scope(|scope| {
+      scope.spawn(|| drop(first));
+      scope.spawn(|| drop(second));
+    });
+
+    *DROP_BARRIER.get().unwrap().lock().unwrap() = None;
+    let retained = CONNS.get().unwrap().lock().unwrap().tcp.remove(&addr);
+    assert!(retained.is_none(), "connection remained registered");
+
+    std::net::TcpListener::bind(addr).unwrap();
+  }
 }

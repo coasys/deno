@@ -1,6 +1,7 @@
-// Copyright 2018-2025 the Deno authors. MIT license.
+// Copyright 2018-2026 the Deno authors. MIT license.
 
 use deno_node::ExtNodeSys;
+use sys_traits::EnvVar;
 use sys_traits::FsCanonicalize;
 use sys_traits::FsCreateDirAll;
 use sys_traits::FsMetadata;
@@ -12,8 +13,10 @@ use sys_traits::FsRename;
 use sys_traits::SystemRandom;
 use sys_traits::ThreadSleep;
 
+#[sys_traits::auto_impl]
 pub trait DenoLibSys:
-  FsCanonicalize
+  EnvVar
+  + FsCanonicalize
   + FsCreateDirAll
   + FsReadDir
   + FsMetadata
@@ -29,26 +32,5 @@ pub trait DenoLibSys:
   + Sync
   + std::fmt::Debug
   + 'static
-{
-}
-
-impl<
-    T: FsCanonicalize
-      + FsCreateDirAll
-      + FsReadDir
-      + FsMetadata
-      + FsOpen
-      + FsRemoveFile
-      + FsRename
-      + FsRead
-      + ThreadSleep
-      + SystemRandom
-      + ExtNodeSys
-      + Clone
-      + Send
-      + Sync
-      + std::fmt::Debug
-      + 'static,
-  > DenoLibSys for T
 {
 }

@@ -1,4 +1,4 @@
-// Copyright 2018-2025 the Deno authors. MIT license.
+// Copyright 2018-2026 the Deno authors. MIT license.
 // deno-lint-ignore-file no-explicit-any
 
 import { assert, assertEquals, assertThrows } from "./test_util.ts";
@@ -49,6 +49,11 @@ Deno.test(function webstorageProxy() {
   localStorage[symbol as any] = "bar";
   assertEquals(localStorage[symbol as any], "bar");
   assertEquals(symbol in localStorage, true);
+});
+
+Deno.test(function webstorageConstructorName() {
+  assertEquals(localStorage.constructor.name, "Storage");
+  assertEquals(sessionStorage.constructor.name, "Storage");
 });
 
 Deno.test(function webstorageGetOwnPropertyDescriptorSymbol() {

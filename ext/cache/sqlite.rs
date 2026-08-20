@@ -1,6 +1,7 @@
-// Copyright 2018-2025 the Deno authors. MIT license.
+// Copyright 2018-2026 the Deno authors. MIT license.
 
 use std::future::poll_fn;
+use std::path::Path;
 use std::path::PathBuf;
 use std::pin::Pin;
 use std::rc::Rc;
@@ -8,27 +9,28 @@ use std::sync::Arc;
 use std::time::SystemTime;
 use std::time::UNIX_EPOCH;
 
+use deno_core::BufMutView;
+use deno_core::Resource;
+use deno_core::convert::ByteString;
 use deno_core::parking_lot::Mutex;
 use deno_core::unsync::spawn_blocking;
-use deno_core::BufMutView;
-use deno_core::ByteString;
-use deno_core::Resource;
-use rusqlite::params;
 use rusqlite::Connection;
 use rusqlite::OptionalExtension;
+use rusqlite::params;
 use tokio::io::AsyncWrite;
 use tokio::io::AsyncWriteExt;
 
-use crate::deserialize_headers;
-use crate::get_header;
-use crate::serialize_headers;
-use crate::vary_header_matches;
 use crate::CacheDeleteRequest;
 use crate::CacheError;
+use crate::CacheKeyEntry;
 use crate::CacheMatchRequest;
 use crate::CacheMatchResponseMeta;
 use crate::CachePutRequest;
 use crate::CacheResponseResource;
+use crate::deserialize_headers;
+use crate::get_header;
+use crate::serialize_headers;
+use crate::vary_header_matches;
 
 #[derive(Clone)]
 pub struct SqliteBackedCache {
@@ -40,6 +42,49 @@ pub struct SqliteBackedCache {
 enum Mode {
   Disk,
   InMemory,
+}
+
+#[allow(
+  clippy::disallowed_methods,
+  reason = "cache storage manages its own directory"
+)]
+fn create_cache_storage_dir(
+  cache_storage_dir: &Path,
+) -> Result<(), CacheError> {
+  if let Ok(metadata) = std::fs::symlink_metadata(cache_storage_dir)
+    && metadata.file_type().is_symlink()
+  {
+    return Err(CacheError::CacheStorageDirectory {
+      dir: cache_storage_dir.to_path_buf(),
+      source: std::io::Error::new(
+        std::io::ErrorKind::InvalidInput,
+        "cache storage directory must not be a symlink",
+      ),
+    });
+  }
+
+  std::fs::create_dir_all(cache_storage_dir).map_err(|source| {
+    CacheError::CacheStorageDirectory {
+      dir: cache_storage_dir.to_path_buf(),
+      source,
+    }
+  })?;
+
+  #[cfg(unix)]
+  {
+    use std::os::unix::fs::PermissionsExt;
+
+    std::fs::set_permissions(
+      cache_storage_dir,
+      std::fs::Permissions::from_mode(0o700),
+    )
+    .map_err(|source| CacheError::CacheStorageDirectory {
+      dir: cache_storage_dir.to_path_buf(),
+      source,
+    })?;
+  }
+
+  Ok(())
 }
 
 impl SqliteBackedCache {
@@ -60,12 +105,7 @@ impl SqliteBackedCache {
       rusqlite::Connection::open_in_memory()
         .unwrap_or_else(|_| panic!("failed to open in-memory cache db"))
     } else {
-      std::fs::create_dir_all(&cache_storage_dir).map_err(|source| {
-        CacheError::CacheStorageDirectory {
-          dir: cache_storage_dir.clone(),
-          source,
-        }
-      })?;
+      create_cache_storage_dir(&cache_storage_dir)?;
 
       let path = cache_storage_dir.join("cache_metadata.db");
       let connection = rusqlite::Connection::open(&path).unwrap_or_else(|_| {
@@ -139,6 +179,10 @@ impl SqliteBackedCache {
         },
       )?;
       let responses_dir = get_responses_dir(cache_storage_dir, cache_id);
+      #[allow(
+        clippy::disallowed_methods,
+        reason = "cache storage manages its own directory"
+      )]
       std::fs::create_dir_all(responses_dir)?;
       Ok::<i64, CacheError>(cache_id)
     })
@@ -188,11 +232,36 @@ impl SqliteBackedCache {
         .optional()?;
       if let Some(cache_id) = maybe_cache_id {
         let cache_dir = cache_storage_dir.join(cache_id.to_string());
+        #[allow(
+          clippy::disallowed_methods,
+          reason = "cache storage manages its own directory"
+        )]
         if cache_dir.exists() {
+          #[allow(
+            clippy::disallowed_methods,
+            reason = "cache storage manages its own directory"
+          )]
           std::fs::remove_dir_all(cache_dir)?;
         }
       }
       Ok::<bool, CacheError>(maybe_cache_id.is_some())
+    })
+    .await?
+  }
+
+  /// List all cache names.
+  pub async fn storage_keys(&self) -> Result<Vec<String>, CacheError> {
+    let db = self.connection.clone();
+    spawn_blocking(move || {
+      let db = db.lock();
+      let mut stmt =
+        db.prepare("SELECT cache_name FROM cache_storage ORDER BY id")?;
+      let rows = stmt.query_map([], |row| row.get::<_, String>(0))?;
+      let mut names = Vec::new();
+      for row in rows {
+        names.push(row?);
+      }
+      Ok::<Vec<String>, CacheError>(names)
     })
     .await?
   }
@@ -243,9 +312,11 @@ impl SqliteBackedCache {
         Some(body_key)
       );
     } else {
-      assert!(insert_cache_asset(db, request_response, None)
-        .await?
-        .is_none());
+      assert!(
+        insert_cache_asset(db, request_response, None)
+          .await?
+          .is_none()
+      );
     }
     Ok(())
   }
@@ -295,14 +366,13 @@ impl SqliteBackedCache {
         // headers of the cached request match the query request.
         if let Some(vary_header) =
           get_header("vary", &cache_meta.response_headers)
-        {
-          if !vary_header_matches(
+          && !vary_header_matches(
             &vary_header,
             &request.request_headers,
             &cache_meta.request_headers,
-          ) {
-            return Ok(None);
-          }
+          )
+        {
+          return Ok(None);
         }
         let response_path =
           get_responses_dir(cache_storage_dir, request.cache_id)
@@ -344,6 +414,47 @@ impl SqliteBackedCache {
         (request.cache_id, &request.request_url),
       )?;
       Ok::<bool, CacheError>(rows_effected > 0)
+    })
+    .await?
+  }
+
+  pub async fn keys(
+    &self,
+    cache_id: i64,
+    request_url: Option<String>,
+  ) -> Result<Vec<CacheKeyEntry>, CacheError> {
+    let db = self.connection.clone();
+    spawn_blocking(move || {
+      let db = db.lock();
+      // When a request URL is provided, filter in SQL rather than
+      // materializing every entry in the cache just to return a single key.
+      let mut sql = String::from(
+        "SELECT request_url, request_headers FROM request_response_list
+             WHERE cache_id = ?1",
+      );
+      let mut sql_params: Vec<rusqlite::types::Value> =
+        vec![rusqlite::types::Value::Integer(cache_id)];
+      if let Some(request_url) = request_url {
+        sql.push_str(" AND request_url = ?2");
+        sql_params.push(rusqlite::types::Value::Text(request_url));
+      }
+      sql.push_str(" ORDER BY id");
+      let mut stmt = db.prepare(&sql)?;
+      let rows =
+        stmt.query_map(rusqlite::params_from_iter(sql_params), |row| {
+          let request_url: String = row.get(0)?;
+          let request_headers: Vec<u8> = row.get(1)?;
+          Ok((request_url, request_headers))
+        })?;
+      let mut entries = Vec::new();
+      for row in rows {
+        let (request_url, request_headers) = row?;
+        entries.push(CacheKeyEntry {
+          request_url,
+          request_headers: deserialize_headers(&request_headers),
+        });
+      }
+      Ok::<Vec<CacheKeyEntry>, CacheError>(entries)
     })
     .await?
   }
@@ -391,7 +502,7 @@ fn get_responses_dir(cache_storage_dir: PathBuf, cache_id: i64) -> PathBuf {
 }
 
 impl deno_core::Resource for SqliteBackedCache {
-  fn name(&self) -> std::borrow::Cow<str> {
+  fn name(&self) -> std::borrow::Cow<'_, str> {
     "SqliteBackedCache".into()
   }
 }
@@ -399,4 +510,52 @@ impl deno_core::Resource for SqliteBackedCache {
 pub fn hash(token: &str) -> String {
   use sha2::Digest;
   format!("{:x}", sha2::Sha256::digest(token.as_bytes()))
+}
+
+#[cfg(all(test, unix))]
+#[allow(
+  clippy::disallowed_methods,
+  reason = "tests control their own temporary filesystem state"
+)]
+mod tests {
+  use std::os::unix::fs::PermissionsExt;
+  use std::os::unix::fs::symlink;
+
+  use super::*;
+
+  #[test]
+  fn cache_storage_dir_rejects_symlink() {
+    let temp_dir = tempfile::tempdir().unwrap();
+    let target_dir = temp_dir.path().join("target");
+    let cache_storage_dir = temp_dir.path().join("cache");
+    std::fs::create_dir(&target_dir).unwrap();
+    symlink(&target_dir, &cache_storage_dir).unwrap();
+
+    let error = create_cache_storage_dir(&cache_storage_dir).unwrap_err();
+    let CacheError::CacheStorageDirectory { dir, source } = error else {
+      panic!("unexpected cache directory error");
+    };
+    assert_eq!(dir, cache_storage_dir);
+    assert_eq!(source.kind(), std::io::ErrorKind::InvalidInput);
+  }
+
+  #[test]
+  fn cache_storage_dir_has_private_permissions() {
+    let temp_dir = tempfile::tempdir().unwrap();
+    let cache_storage_dir = temp_dir.path().join("cache");
+    std::fs::create_dir(&cache_storage_dir).unwrap();
+    std::fs::set_permissions(
+      &cache_storage_dir,
+      std::fs::Permissions::from_mode(0o777),
+    )
+    .unwrap();
+
+    create_cache_storage_dir(&cache_storage_dir).unwrap();
+
+    let mode = std::fs::metadata(&cache_storage_dir)
+      .unwrap()
+      .permissions()
+      .mode();
+    assert_eq!(mode & 0o777, 0o700);
+  }
 }

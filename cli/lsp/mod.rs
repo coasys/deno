@@ -1,14 +1,9 @@
-// Copyright 2018-2025 the Deno authors. MIT license.
-
-use std::sync::Arc;
+// Copyright 2018-2026 the Deno authors. MIT license.
 
 use deno_core::error::AnyError;
-pub use repl::ReplCompletionItem;
-pub use repl::ReplLanguageServer;
 use tower_lsp::LspService;
 use tower_lsp::Server;
 
-use self::diagnostics::should_send_diagnostic_batch_index_notifications;
 use crate::lsp::language_server::LanguageServer;
 
 mod analysis;
@@ -16,12 +11,14 @@ mod cache;
 mod capabilities;
 mod client;
 mod code_lens;
+mod compiler_options;
 mod completions;
 mod config;
 mod diagnostics;
 mod documents;
 mod jsr;
 pub mod language_server;
+mod lint;
 mod logging;
 mod lsp_custom;
 mod npm;
@@ -30,33 +27,31 @@ mod path_to_regex;
 mod performance;
 mod refactor;
 mod registries;
-mod repl;
 mod resolver;
 mod search;
 mod semantic_tokens;
+mod test_code_actions;
 mod testing;
 mod text;
 mod trace;
+mod ts_server;
 mod tsc;
 mod urls;
 
-pub async fn start(
-  registry_provider: Arc<
-    dyn deno_lockfile::NpmPackageInfoProvider + Send + Sync,
-  >,
-) -> Result<(), AnyError> {
+pub async fn start() -> Result<(), AnyError> {
   let stdin = tokio::io::stdin();
   let stdout = tokio::io::stdout();
 
   let builder = LspService::build(|client| {
-    language_server::LanguageServer::new(
-      client::Client::from_tower(client),
-      registry_provider,
-    )
+    language_server::LanguageServer::new(client::Client::from_tower(client))
   })
   .custom_method(
     lsp_custom::PERFORMANCE_REQUEST,
     LanguageServer::performance_request,
+  )
+  .custom_method(
+    lsp_custom::INFERRED_TYPE_REQUEST,
+    LanguageServer::inferred_type,
   )
   .custom_method(lsp_custom::TASK_REQUEST, LanguageServer::task_definitions)
   .custom_method(testing::TEST_RUN_REQUEST, LanguageServer::test_run_request)
@@ -67,16 +62,15 @@ pub async fn start(
   .custom_method(
     lsp_custom::VIRTUAL_TEXT_DOCUMENT,
     LanguageServer::virtual_text_document,
+  )
+  .custom_method(
+    lsp_custom::VIRTUAL_TEXT_DOCUMENT,
+    LanguageServer::virtual_text_document,
+  )
+  .custom_method(
+    lsp_custom::VIRTUAL_TEXT_DOCUMENT,
+    LanguageServer::virtual_text_document,
   );
-
-  let builder = if should_send_diagnostic_batch_index_notifications() {
-    builder.custom_method(
-      lsp_custom::LATEST_DIAGNOSTIC_BATCH_INDEX,
-      LanguageServer::latest_diagnostic_batch_index_request,
-    )
-  } else {
-    builder
-  };
 
   let (service, socket, pending) = builder.finish();
   Server::new(stdin, stdout, socket, pending)

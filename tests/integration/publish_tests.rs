@@ -1,14 +1,16 @@
-// Copyright 2018-2025 the Deno authors. MIT license.
+// Copyright 2018-2026 the Deno authors. MIT license.
 
 use std::process::Command;
 
 use serde_json::json;
+use test_util::TestContextBuilder;
 use test_util::assert_contains;
 use test_util::assert_not_contains;
 use test_util::env_vars_for_jsr_provenance_tests;
 use test_util::env_vars_for_jsr_tests;
 use test_util::env_vars_for_jsr_tests_with_git_check;
-use test_util::TestContextBuilder;
+use test_util::eprintln;
+use test_util::test;
 
 #[test]
 fn publish_non_exported_files_using_import_map() {
@@ -36,12 +38,16 @@ fn publish_non_exported_files_using_import_map() {
   output.assert_exit_code(0);
   let lines = output.combined_output().split('\n').collect::<Vec<_>>();
   eprintln!("{}", output.combined_output());
-  assert!(lines
-    .iter()
-    .any(|l| l.contains("Unfurling") && l.ends_with("mod.ts")));
-  assert!(lines
-    .iter()
-    .any(|l| l.contains("Unfurling") && l.ends_with("other.ts")));
+  assert!(
+    lines
+      .iter()
+      .any(|l| l.contains("Unfurling") && l.ends_with("mod.ts"))
+  );
+  assert!(
+    lines
+      .iter()
+      .any(|l| l.contains("Unfurling") && l.ends_with("other.ts"))
+  );
 }
 
 #[test]
@@ -83,6 +89,31 @@ fn provenance() {
     .run()
     .assert_exit_code(0)
     .assert_matches_file("publish/successful_provenance.out");
+}
+
+/// A registry that rejects the attestation must not fail the publish — the
+/// version is already live and immutable — but it must say so. Regression test
+/// for jsr-io/jsr#1474, where this response was discarded and a registry that
+/// rejected every attestation was indistinguishable from one that accepted
+/// them.
+#[test]
+fn provenance_rejected_by_registry() {
+  let output = TestContextBuilder::new()
+    .use_http_server()
+    .envs(env_vars_for_jsr_provenance_tests())
+    .cwd("publish/provenance_rejected")
+    .build()
+    .new_command()
+    .args("publish")
+    .run();
+  output.assert_exit_code(0);
+  output.assert_matches_file("publish/provenance_rejected.out");
+  // The success line must not claim a transparency-log entry the registry never
+  // accepted.
+  assert_not_contains!(
+    output.combined_output(),
+    "Provenance transparency log available at"
+  );
 }
 
 #[test]
@@ -504,7 +535,10 @@ fn allow_dirty_dry_run() {
     .run();
   output.assert_exit_code(1);
   let output = output.combined_output();
-  assert_contains!(output, "Aborting due to uncommitted changes. Check in source code or run with --allow-dirty");
+  assert_contains!(
+    output,
+    "Aborting due to uncommitted changes. Check in source code or run with --allow-dirty"
+  );
 }
 
 fn publish_context_builder() -> TestContextBuilder {
